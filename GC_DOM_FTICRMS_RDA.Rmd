@@ -1,0 +1,2598 @@
+---
+title: "Groves Creek RDA analysis of FT-ICR MS DOM composition"
+author: "Mackenzie Fiss"
+date: "3/21/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(vegan)
+library(chron)
+library(zoo)
+library(lubridate)
+library(tidyverse)
+#library(dave)
+library(reshape2)
+library(cmocean)
+library(ggrepel)
+library(ggpubr)
+library(caret)
+library(GGally)
+library(plotly)
+library(colorblindcheck)
+library(Hmisc)
+library(patchwork)
+library(ggplotify)
+```
+
+# Formatting BCO-DMO data and raw FT-ICR MS intensities
+
+```{r, warning=FALSE}
+# Environmental data -- BCO-DMO data prepared in BCODMO_prep.Rmd and tidal_stage.Rmd
+# External hydrological and physical data prepared in GC_hydro_phys_prep.Rmd
+BCODMO_DD_MF_0223_2 <- read.csv("BCODMO_R.csv", header = T)
+BCODMO_DD_MF_0223_2$Datetime <- mdy_hm(BCODMO_DD_MF_0223_2$Datetime)
+BCODMO_DD_MF_0223_2$Date <- date(BCODMO_DD_MF_0223_2$Datetime)
+BCODMO_DD_MF_0223_2$Time <- format(BCODMO_DD_MF_0223_2$Datetime, format = "%H:%M:%S")
+BCODMO_DD_MF_0223_2$Time <- hms::as_hms(BCODMO_DD_MF_0223_2$Time)
+rownames(BCODMO_DD_MF_0223_2) <- BCODMO_DD_MF_0223_2$Sample.ID
+
+BCODMO.RDA.0323 <- BCODMO_DD_MF_0223_2[,c(1:8,10:19)] # temporarily removing ADP water level
+# to filter out samples with missing environmental data (lots with missing ADP data, 
+# measured ADP water level will not used as an explanatory variable)
+BCODMO.RDA.0323 <- na.omit(BCODMO.RDA.0323) # 379 samples
+
+# FTIC data
+FTIC.raw.0323 <- read.csv("GC_updated_trim_0223.csv", header = T) 
+# 473 samples (10L AND 1L, sample IDs for 10L samples have _10L added to the end) 
+# and 4501 formulas, raw intensities
+FTIC.data.0323 <- FTIC.raw.0323[,c(1,3:10)] # subsetting FTIC data
+rownames(FTIC.data.0323) <- FTIC.raw.0323$formula_isotopefree # making molecular formulas rownames
+
+FTIC.0323 <- FTIC.raw.0323[,c(11:483)] # subsetting only formula abundances
+rownames(FTIC.0323) <- FTIC.raw.0323$formula_isotopefree # make formulas your rownames 
+# (columns are samples)
+
+# Subsetting FTIC data
+FTIC.0323.10L <- FTIC.0323 %>% # raw data
+  select(ends_with("10L")) # just the 10L samples -- 49
+
+FTIC.0323.1L <- FTIC.0323 %>% # raw data
+  select(!ends_with("10L")) %>% # just the 1L samples -- 424
+  select(!ends_with(".1")) %>% # removes any samples run twice -- 420 samples
+  select(!contains("GC131203_02")) %>% # also remove GC131203_02, GC141216_06
+  select(!contains("GC131203_05")) %>% # GC131203_05
+  select(!contains("GC131203_12")) %>% # GC131203_12
+  select(!contains("GC141216_06")) # and GC141216_06416 (these were the samples that 
+# were run twice, discard those too) -- 416 samples remaining
+
+FTIC.0323.1L.t <- data.frame(t(FTIC.0323.1L)) # transpose so samples are rows
+
+# Now subset by samples with environmental data
+
+raw.GC.FTIC.env.0323 <- subset(FTIC.0323.1L.t, rownames(FTIC.0323.1L.t) %in% 
+                                 rownames(BCODMO.RDA.0323)) # down to 337 samples
+
+raw.GC.FTIC.env.0323.t <- data.frame(t(raw.GC.FTIC.env.0323)) # transposing
+
+```
+
+# SDL
+
+### Data formatting for SDL correction
+
+The data should be imported as NA (non-detected values) instead of zeroes in the raw data, which has 337 samples (those with environmental data) included and 4501 formulas. 
+
+```{r}
+before_norm <- raw.GC.FTIC.env.0323 # formulas as columns
+raw.GC.FTIC.env.0323.t[raw.GC.FTIC.env.0323.t==0] <-  NA # changes all 0s to NA values
+before_norm_t <- raw.GC.FTIC.env.0323.t # samples as columns
+
+before_norm_zeroes <- before_norm_t # we do also need a copy of the dataframe with 0s though
+before_norm_zeroes[is.na(before_norm_zeroes)] <- 0 
+```
+
+### SDL based on a DR calculated using all peaks and the 10 lowest abundance peaks (Stubbins et al. 2014)
+The 10 lowest abundance peaks per sample as well as their averages were calculated previously (or can be calculated below). 
+
+```{r}
+lowest_10 <- data.frame(apply(before_norm_t, 2, function(x) sort(x, decreasing = F)[1:10])) # the lowest ten intensities of each sample
+
+mean_abundance_low <- data.frame(colMeans(lowest_10))
+mean_abundance_all <-  data.frame(colMeans(before_norm_t, na.rm = T))
+```
+
+Next, create an empty matrix that is the size of the mean_abundance_all matrix and calculate the dynamic range of each sample, found using the equation
+
+```{r}
+GC_DR_all_10 <- mean_abundance_all / mean_abundance_low
+```
+
+The lowest DR within the dataset is identified using MATLAB's min function.
+
+```{r}
+lowest_DR_all_10 <- min(GC_DR_all_10)
+
+GC_lowest_DR_all_10 <- lowest_DR_all_10
+```
+
+The following command again creates an empty matrix the size of the mean_abundance_all matrix. The SDL of each sample is calculated using the equation
+
+```{r}
+GC_SDL_all_10 <- mean_abundance_all / lowest_DR_all_10
+```
+
+To identify the peak abundances lower than the SDL calculated in the previous step, first create a matrix that is the size of our starting matrix and then find any values lower than their respective SDL by incrementing a while loop through each column, i.e., sample. This returns a logical matrix, where 0 indicates that the value is greater than its SDL (false) and 1 indicates that the value is less than its SDL (true).
+
+```{r}
+below_SDL_all_10 <- data.frame(matrix(nrow = nrow(before_norm_t), ncol = ncol(before_norm_t)))
+```
+
+```{r}
+GC_SDL_all_10_t <- data.frame(t(GC_SDL_all_10))
+
+for (i in 1:ncol(before_norm_t))
+{
+  for (j in 1:nrow(before_norm_t))
+  {
+    below_SDL_all_10[j,i] = before_norm_t[j,i] < GC_SDL_all_10_t[1,i]
+  }
+};system(notify)
+
+# if your logicals are all TRUE/FALSE, convert to 0s (F) and 1s (T)
+below_SDL_all_10 <- data.frame(ifelse(below_SDL_all_10 == FALSE, 0, 1))
+
+below_SDL_all_10_zeroes <- below_SDL_all_10
+below_SDL_all_10_zeroes[is.na(below_SDL_all_10_zeroes)] <- 0 # this and the line below give you the same output for the colSums with if you add the na.rm = T arg or convert NAs to 0s 
+```
+
+To identify the number of peaks less than the SDL per sample, add the values equal to 1 (true) in each column. Then convert the logical matrix into a numerical matrix and write over all true values with their SDL.
+
+```{r}
+GC_below_SDL_all_10 <- data.frame(colSums(below_SDL_all_10, na.rm = T))
+
+colSums(below_SDL_all_10_zeroes) # see? same results
+```
+
+```{r}
+GC_SDL_all_10_corrected <- below_SDL_all_10_zeroes
+```
+
+```{r}
+for (i in 1:ncol(below_SDL_all_10_zeroes))
+{
+  for (j in 1:nrow(below_SDL_all_10_zeroes))
+  {
+   if (below_SDL_all_10_zeroes[j,i] == 1) {
+    GC_SDL_all_10_corrected[j,i] = GC_SDL_all_10_t[1,i]
+   }
+  }
+};system(notify) # this won't run with NAs in below_SDL_all_10
+```
+
+```{r}
+for (i in 1:ncol(below_SDL_all_10_zeroes))
+{
+  for (j in 1:nrow(below_SDL_all_10_zeroes))
+  {
+   if (below_SDL_all_10_zeroes[j,i] == 0)
+    GC_SDL_all_10_corrected[j,i] = before_norm_t[j,i]
+  }
+};system(notify)
+```
+
+The following function identifies each value as being NaN (equal to 1, i.e., true) or not NaN (equal to 0, i.e., false), which serves as an index so you know where your NaN's are. The loop writes over all NaN cells (i.e., non-detects) with that sample's SDL. 
+This doesn't change for whichever DR and SDL method you use; I just created it as another variable in case only this portion of the code is used.
+
+```{r}
+# converts all NAs to zeroes and then replaces missing values with SDL for each sample
+
+GC_SDL_all_10_corrected_NAs <- GC_SDL_all_10_corrected # just creating a copy in case anything goes wrong
+GC_SDL_all_10_corrected[is.na(GC_SDL_all_10_corrected)] <- 0
+
+for (i in 1:ncol(GC_SDL_all_10_corrected))
+{
+  for (j in 1:nrow(GC_SDL_all_10_corrected))
+  {
+   if (GC_SDL_all_10_corrected[j,i] == 0)
+    GC_SDL_all_10_corrected[j,i] = GC_SDL_all_10_t[1,i]
+  }
+};system(notify)
+
+colnames(GC_SDL_all_10_corrected) <- colnames(before_norm_t)
+rownames(GC_SDL_all_10_corrected) <- rownames(before_norm_t)
+
+GC_SDL_all_10_env_0323 <- GC_SDL_all_10_corrected
+```
+
+And now you've calculated your DR and SDL based on the average of all peaks and the 10 lowest abundance peaks!
+
+# Post-SDL processing
+
+### Removing outliers from SDL-corrected data
+
+```{r}
+GC_SDL_all_10_env_0323_t <- data.frame(t(GC_SDL_all_10_env_0323))
+
+SDL.outliers <- outlier(GC_SDL_all_10_env_0323_t, thresh = 0.01, y=0.5) # 15 outliers identified
+
+removed.samples <- anti_join(rownames_to_column(GC_SDL_all_10_env_0323_t), rownames_to_column(SDL.outliers$new.data), by = "rowname") # the 15 samples removed from SDL
+removed.samples$rowname # plots of outlier samples below
+
+FTIC.check <- cbind(FTIC.data.0323[1], GC_SDL_all_10_env_0323) # combining formula masses 
+# with SDL-corrected intensities
+
+par(mfrow=c(2,2))
+
+plot(x = FTIC.check$reference, y = FTIC.check$GC131028_03, xlab = "Mass (Da)", ylab = "GC131028_03") 
+# lots of formulas with intensities higher than most
+plot(x = FTIC.check$reference, y = FTIC.check$GC131203_09, xlab = "Mass (Da)", ylab = "GC131203_09") 
+# one outlier formula
+plot(x = FTIC.check$reference, y = FTIC.check$GC131218_08, xlab = "Mass (Da)", ylab = "GC131218_08") 
+# two outlier formulas
+plot(x = FTIC.check$reference, y = FTIC.check$GC140114_01, xlab = "Mass (Da)", ylab = "GC140114_01") 
+# lots of formulas with intensities higher than most
+plot(x = FTIC.check$reference, y = FTIC.check$GC140306_01, xlab = "Mass (Da)", ylab = "GC140306_01") 
+# lots of formulas with intensities higher than most
+plot(x = FTIC.check$reference, y = FTIC.check$GC140306_03, xlab = "Mass (Da)", ylab = "GC140306_03") 
+# lots of formulas with intensities higher than most, one much higher
+plot(x = FTIC.check$reference, y = FTIC.check$GC140306_07, xlab = "Mass (Da)", ylab = "GC140306_07") 
+# two outlier formulas
+plot(x = FTIC.check$reference, y = FTIC.check$GC140320_05, xlab = "Mass (Da)", ylab = "GC140320_05") 
+# lots of formulas with intensities higher than most
+plot(x = FTIC.check$reference, y = FTIC.check$GC140403_04, xlab = "Mass (Da)", ylab = "GC140403_04") 
+# lots of formulas with intensities higher than most
+plot(x = FTIC.check$reference, y = FTIC.check$GC140403_12, xlab = "Mass (Da)", ylab = "GC140403_12") 
+# one really high outlying formula, depending on your cutoff, several other formulas as well
+plot(x = FTIC.check$reference, y = FTIC.check$GC140918_07, xlab = "Mass (Da)", ylab = "GC140918_07") 
+# one really high outlying formula, depending on your cutoff, several other formulas as well
+plot(x = FTIC.check$reference, y = FTIC.check$GC141202_03, xlab = "Mass (Da)", ylab = "GC141202_03") 
+# three outlier formulas
+plot(x = FTIC.check$reference, y = FTIC.check$GC141216_11, xlab = "Mass (Da)", ylab = "GC141216_11") 
+# lots of formulas with intensities higher than most
+plot(x = FTIC.check$reference, y = FTIC.check$GC150124_13, xlab = "Mass (Da)", ylab = "GC150124_13") 
+# two outlier formulas
+plot(x = FTIC.check$reference, y = FTIC.check$GC150225_03, xlab = "Mass (Da)", ylab = "GC150225_03") 
+# two outlier formulas
+
+GC.SDL.out.0323 <- SDL.outliers$new.data # 322 samples remaining after outlier removal
+```
+
+### Removing all peaks below the samples' SDLs
+
+```{r}
+below_SDL_all_10_ones <- below_SDL_all_10 # copy logical dataframe of 0 (not < SDL), 1 (< SDL), or NA, created in an earlier step
+below_SDL_all_10_ones[is.na(below_SDL_all_10_ones)] <- 1 # turn all NA values to 1 (< SDL)
+
+GC_no_SDL <- below_SDL_all_10_ones
+
+for (i in 1:ncol(below_SDL_all_10_ones)) # replace all 0 values (not < SDL) with raw value
+{
+  for (j in 1:nrow(below_SDL_all_10_ones))
+  {
+   if (below_SDL_all_10_ones[j,i] == 0)
+    GC_no_SDL[j,i] = before_norm_t[j,i]
+  }
+};system(notify)
+
+GC_no_SDL[GC_no_SDL==1] <-  NA # replace all 1 values with NA
+
+colnames(GC_no_SDL) <- colnames(before_norm_t)
+rownames(GC_no_SDL) <- rownames(before_norm_t)
+```
+
+### Removing outlier samples from non-SDL data
+
+```{r}
+GC.no.SDL.t <- data.frame(t(GC_no_SDL))
+
+GC.no.SDL.sub <- subset(GC.no.SDL.t, rownames(GC.no.SDL.t) %in% rownames(GC.SDL.out.0323)) # these were the outlier samples identified in the SDL-corrected data (the outlier function can't have NAs)
+GC.no.SDL.sub.t <- data.frame(t(GC.no.SDL.sub))
+
+formula.freq <- data.frame(t(GC.no.SDL.sub %>% 
+  summarise(across(everything(), ~ sum(!is.na(.)))))) # counts the number of samples each formula is in (e.g. intensities not equal to 0)
+colnames(formula.freq) <- "n" # this column is the number of samples each formula is in
+
+formula.freq.3 <- formula.freq %>% # leaves 4431 formulas in more than 3 samples 
+  filter(n > 3)
+
+GC.no.SDL.sub2.t <- subset(GC.no.SDL.sub.t, rownames(GC.no.SDL.sub.t) %in% rownames(formula.freq.3)) # removes formulas than occur in fewer than 4 samples from our non-SDL corrected intensities
+```
+
+# Normalizing (no SDL applied)
+
+### Normalizing within samples (sum normalizing)
+
+Just as a clarification, normalization can refer a number of different data transformations - in this instance we normalize each element (peak intensity) by dividing the value by the sum of all peak intensities within the sample, which we call sum normalizing and is done for each sample (within samples). This is known as feature scaling or unity-based normalization and is done within samples, where the range of the new data is between 0 and 1, meaning each sample's intensities sum to 1, and then we multiply by 1000 so values are larger (so each sample's intensities sum to 1000).
+
+```{r}
+# count number of compounds/peaks/formulas per sample
+
+colSums(GC.no.SDL.sub2.t > 1, na.rm = TRUE)
+```
+
+```{r}
+intensity_matrix <- data.frame(t(GC.no.SDL.sub2.t))
+intensity_matrix[is.na(intensity_matrix)] <- 0 # replaces NAs with 0s
+sample_sum <- rowSums(intensity_matrix) # sum of all peak intensities in each sample (as rows)
+norm.FTIC <- (intensity_matrix / sample_sum) * 1000 # sum-normalizes and is input for scaling across samples, formulas as columns
+```
+
+### Normalizing across samples (formulas -- min-max normalizing)
+
+(V - min V)/(max V - min V)
+
+This scales and adjusts each formula's intensities (across samples), so that they range from from 0 to 1 with min-max normalization. This method changes only the range of values without changing the distribution of the data. 
+
+```{r}
+process <- preProcess(as.data.frame(norm.FTIC), method=c("range")) # enables us to scale the value to a range of 0 to 1 using method = c('range') as an argument
+norm_scale <- predict(process, as.data.frame(norm.FTIC)) # predict() method applies the actions of the preProcess() function on the entire data frame
+scaled.norm.GC.noSDL.0s <- norm_scale
+
+rownames(scaled.norm.GC.noSDL.0s) <- rownames(norm.FTIC)
+colnames(scaled.norm.GC.noSDL.0s) <- colnames(norm.FTIC)
+```
+
+# Checking dissimilarity post-normalizing (322 samples)
+
+```{r}
+FTIC.diss.0323 <- as.matrix(vegdist(scaled.norm.GC.noSDL.0s, method = "bray", upper = T)) 
+FTIC.diss.hc.0323 <- hclust(as.dist(FTIC.diss.0323))
+
+FTIC.diss.long.0323 <- FTIC.diss.0323 %>% 
+  as.matrix %>% 
+  melt %>%
+  mutate(Var1 = factor(Var1, levels = unique(FTIC.diss.hc.0323$labels)
+                       [FTIC.diss.hc.0323$order])) %>%
+  mutate(Var2 = factor(Var2, levels = unique(FTIC.diss.hc.0323$labels)
+                       [FTIC.diss.hc.0323$order]))
+
+FTIC.diss.long.0323 %>%  
+  ggplot(aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() + 
+  scale_fill_cmocean(name = "ice", guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8)) +
+  theme(axis.text.x = element_text(angle = 270, vjust = 0.5),
+        axis.text=element_text(size=3)) +
+  labs(x = "Samples", y = "Samples", fill = "Dissimilarity") 
+# where a higher value = more dissimilarity between that sample and others
+```
+
+## Checking color palettes against color deficiencies
+
+```{r}
+season.pal <- c("#225256", "#619FAD", "#EAA6B0", "#DB6160")
+help("cmocean-package")
+balance.pal <- c("#1E2555", "#234AB3", "#9EBCC7", "#F0EBEB", "#E3C9C1","#C36346", "#620E23") # extracted colors from the cmocean balance palette
+deep.pal <- c("#E8F6C0", "#BEE7AD", "#5CB9A4", "#427B99", "#3F5490", "#342845")
+
+palette_check(season.pal, plot = TRUE)
+palette_check(balance.pal, plot = TRUE)
+palette_check(deep.pal, plot = TRUE)
+```
+
+# RDA (and PCA)
+
+## Running RDA (322 samples and 4431 formulas)
+
+```{r}
+BCODMO.RDA.0323.sub <- subset(BCODMO.RDA.0323, rownames(BCODMO.RDA.0323) %in% rownames(scaled.norm.GC.noSDL.0s)) # 322 samples
+
+BCODMO.RDA.0323.scaled <- data.frame(scale(BCODMO.RDA.0323.sub[,c(5,7,9,16,17)], center = T))
+  
+(RDA.noSDL.0323 <- rda(scaled.norm.GC.noSDL.0s ~ Salinity + Pred.cont.WL + Temperature + Ant.Weekly.Total.Discharge.m3s + Amt.sunlight.hrs, BCODMO.RDA.0323.scaled))
+plot(RDA.noSDL.0323)
+```
+
+So our constrained (RDA) model with 322 samples explains 17.17% of the total variance, with RDA1 explaining 11.6% (18.286/157.0124) and RDA2 explaining 3.5% (5.547/157.0124). Salinity and antecedent discharge account for most of the variance in RDA1, while temperature, day length (Amt.sunlight.hrs), and water level (Pred.cont.WL) drive RDA2 more. Our unconstrained model (PCA) explains 82.8% of the total variance, with PC1 explaining 25.9% (40.61/157.0124).
+
+## Extracting RDA data
+
+```{r}
+FTIC.noSDL <- subset(FTIC.data.0323, rownames(FTIC.data.0323) %in% rownames(GC.no.SDL.sub2.t)) # subsetting our molecular characteristics from 4501 formulas to 4431
+
+# intensity weighted averages of molecular traits calculated in FTIC_classifications_083022.Rmd
+
+weighted.avg.RDA <- subset(weighted_avg, rownames(weighted_avg) %in% rownames(BCODMO.RDA.0323.sub))
+
+# diversity metrics calculated in FTIC_classifications_083022.Rmd
+# DOM indices calculated in DOM_indices.Rmd
+
+BCODMO.RDA.0323.sub <- cbind(BCODMO.RDA.0323.sub, season.RDA[2], weighted.avg.RDA, all.index.sums[c(1,3:5)], diversity_table[2:4])
+colnames(BCODMO.RDA.0323.sub)[19] <- "Season"
+BCODMO.RDA.0323.sub$Season <- as.factor(BCODMO.RDA.0323.sub$Season)
+BCODMO.RDA.0323.sub$Season <- factor(BCODMO.RDA.0323.sub$Season, levels = c("Winter","Spring","Summer","Fall"))
+
+FTIC.data.noSDL <- cbind(FTIC.data.noSDL, compound_class)
+
+# extract RDA scores and merge with env data
+RDA.scores.noSDL <- data.frame(RDA.noSDL.0323[["CCA"]][["wa"]])
+RDA.scores.noSDL <- cbind(BCODMO.RDA.0323.sub, RDA.scores.noSDL)
+# extract RDA loadings and merge with FTIC data
+RDA.corr.noSDL <- data.frame(RDA.noSDL.0323[["CCA"]][["v"]])
+RDA.corr.noSDL <- cbind(FTIC.data.noSDL, RDA.corr.noSDL)
+# extract PCA scores and merge with env data
+PCA.scores.noSDL <- data.frame(RDA.noSDL.0323[["CA"]][["u"]])
+PCA.scores.noSDL <- cbind(BCODMO.RDA.0323.sub, PCA.scores.noSDL[1:5])
+# extract PCA loadings and merge with FTIC data
+PCA.corr.noSDL <- data.frame(RDA.noSDL.0323[["CA"]][["v"]])
+PCA.corr.noSDL <- cbind(FTIC.data.noSDL, PCA.corr.noSDL[1:5])
+```
+
+## Calculating variance explained
+
+```{r}
+RDA.0323.TINT <- RDA.noSDL.0323[["tot.chi"]]
+
+#### constrained
+
+RDA.0323.TINT.expl <- RDA.noSDL.0323[["CCA"]][["tot.chi"]]
+
+(RDA.0323.TINT.expl / RDA.0323.TINT)*100 # 17.16% constrained -- 82.83% unconstrained
+
+RDA1.inertia <- RDA.noSDL.0323[["CCA"]][["eig"]][["RDA1"]]
+(RDA1.inertia / RDA.0323.TINT)*100
+(RDA1.inertia / RDA.0323.TINT.expl)*100
+
+RDA2.inertia <- RDA.noSDL.0323[["CCA"]][["eig"]][["RDA2"]]
+(RDA2.inertia / RDA.0323.TINT)*100
+(RDA2.inertia / RDA.0323.TINT.expl)*100
+
+RDA3.inertia <- RDA.noSDL.0323[["CCA"]][["eig"]][["RDA3"]]
+(RDA3.inertia / RDA.0323.TINT)*100
+(RDA3.inertia / RDA.0323.TINT.expl)*100
+
+RDA4.inertia <- RDA.noSDL.0323[["CCA"]][["eig"]][["RDA4"]]
+(RDA4.inertia / RDA.0323.TINT)*100 # insignificant
+
+RDA5.inertia <- RDA.noSDL.0323[["CCA"]][["eig"]][["RDA5"]]
+(RDA5.inertia / RDA.0323.TINT)*100 # insignificant
+
+#### unconstrained
+
+PC1.inertia <- RDA.noSDL.0323[["CA"]][["eig"]][["PC1"]]
+(PC1.inertia / RDA.0323.TINT)*100
+
+PC2.inertia <- RDA.noSDL.0323[["CA"]][["eig"]][["PC2"]]
+(PC2.inertia / RDA.0323.TINT)*100
+
+PC3.inertia <- RDA.noSDL.0323[["CA"]][["eig"]][["PC3"]]
+(PC3.inertia / RDA.0323.TINT)*100
+
+PC4.inertia <- RDA.noSDL.0323[["CA"]][["eig"]][["PC4"]]
+(PC4.inertia / RDA.0323.TINT)*100
+
+```
+
+## ANOVA of RDA
+
+```{r}
+RDA.noSDL.margin <- anova(RDA.noSDL.0323, by = "margin", permutations = 999);system(notify)
+RDA.noSDL.terms <- anova(RDA.noSDL.0323, by = "terms", permutations = 999);system(notify)
+RDA.noSDL.axis <- anova(RDA.noSDL.0323, by = "axis", permutations = 999);system(notify)
+```
+
+## Variance partitioning
+
+```{r}
+# just salinity - constrained inertia is 14.83352
+sal.rda <- rda(scaled.norm.GC.noSDL.0s ~ Salinity + Condition(Pred.cont.WL, Temperature,  Ant.Weekly.Total.Discharge.m3s, Amt.sunlight.hrs), BCODMO.RDA.0323.scaled)
+
+# just water temp - constrained inertia is 7.90428
+temp.rda <- rda(scaled.norm.GC.noSDL.0s ~ Temperature + Condition(Pred.cont.WL, Salinity,  Ant.Weekly.Total.Discharge.m3s, Amt.sunlight.hrs), BCODMO.RDA.0323.scaled)
+
+# just discharge - constrained inertia is 14.159
+dis.rda <- rda(scaled.norm.GC.noSDL.0s ~ Ant.Weekly.Total.Discharge.m3s + Condition(Pred.cont.WL, Salinity, Temperature, Amt.sunlight.hrs), BCODMO.RDA.0323.scaled)
+
+# just water level - constrained inertia is 1.1393
+WL.rda <- rda(scaled.norm.GC.noSDL.0s ~ Pred.cont.WL + Condition(Ant.Weekly.Total.Discharge.m3s, Salinity, Temperature, Amt.sunlight.hrs), BCODMO.RDA.0323.scaled)
+
+# just daylength - constrained inertia is 5.26879
+daylength.rda <- rda(scaled.norm.GC.noSDL.0s ~ Amt.sunlight.hrs + Condition(Ant.Weekly.Total.Discharge.m3s, Salinity, Temperature, Pred.cont.WL), BCODMO.RDA.0323.scaled)
+
+total.inertia <- RDA.noSDL.0323[["tot.chi"]]
+unconstrained.inertia <- RDA.noSDL.0323[["CA"]][["tot.chi"]]
+constrained.inertia <- RDA.noSDL.0323[["CCA"]][["tot.chi"]]
+# the constrained intertia of each pCCA
+WL.inertia <- WL.rda[["CCA"]][["tot.chi"]]
+sal.inertia <- sal.rda[["CCA"]][["tot.chi"]]
+temp.inertia <- temp.rda[["CCA"]][["tot.chi"]]
+dis.inertia <- dis.rda[["CCA"]][["tot.chi"]]
+day.inertia <- daylength.rda[["CCA"]][["tot.chi"]]
+
+WL.prop <- WL.inertia / constrained.inertia
+sal.prop <- sal.interia / constrained.inertia
+temp.prop <- temp.inertia / constrained.inertia
+dis.prop <- dis.inertia / constrained.inertia
+day.prop <- day.inertia / constrained.inertia
+unconstrained.prop <- unconstrained.inertia / total.inertia
+
+(WL.perc <- WL.prop *100)
+(sal.perc <- sal.prop * 100)
+(temp.perc <- temp.prop * 100)
+(dis.perc <- dis.prop * 100)
+(day.perc <- day.prop * 100)
+
+(unconstrained.perc <- unconstrained.prop * 100)
+
+sum(WL.perc,sal.perc,temp.perc,dis.perc,day.perc) 
+```
+
+## Biplot of RDA1 and RDA2
+
+```{r}
+RDA.arrows.0323 <- vegan::scores(RDA.noSDL.0323, choices = c(1,2), display = "bp")
+RDA.arrows.0323 <- RDA.arrows.0323*0.15
+rownames(RDA.arrows.0323) <- c("Salinity", "Water level", "Water temperature", "Total weekly discharge", "Daylength")
+
+# color = "cadetblue4"
+
+RDA.biplot <- ggplot(data = RDA.scores.noSDL, 
+       aes(x = RDA1, y = RDA2, color = Season)) + 
+     geom_point(data = RDA.scores.noSDL, size = 3, alpha = 0.5) +
+  #scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8)) + 
+     geom_segment(data = data.frame(RDA.arrows.0323), aes(x = 0, y = 0, xend = RDA1, yend = RDA2), size = 0.3, color = "black", arrow = arrow(length = unit(0.08, "inches"))) +
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")+
+  labs(x = "RDA1 (11.6%)", y = "RDA2 (3.5%)") + 
+  scale_color_manual(values=c("#98C0C0", "#4A8088", "#EAA6B0", "#DB6160")) +
+  scale_x_continuous(limits=c(-0.15, 0.15), breaks = seq(-0.15, 0.15, 0.075)) + 
+  scale_y_continuous(limits=c(-0.3, 0.2)) +
+  annotate("text", x = 0.012, y = 0.055, label = "Water level", size = 3.75) + #fontface = "bold"
+  annotate("text", x = 0.12, y = -0.034, label = "Discharge", size = 3.75) +
+  annotate("text", x = -0.13, y = 0.01, label = "Salinity", size = 3.75) +
+  annotate("text", x = -0.10, y = -0.152, label = "Water \ntemperature", size = 3.75) +
+  annotate("text", x = 0, y = -0.157, label = "Daylength", size = 3.75)+
+  guides(color = "none")
+
+#ggsave("RDA biplot_noSDL_0323.pdf",width = 5, height = 4)
+
+PCA.biplot <- ggplot(PCA.scores.noSDL, 
+       aes(x = PC1, y = PC2, color = Season)) +
+  geom_point(alpha = 0.5, size = 3) + 
+  theme_linedraw()+
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")+
+  scale_x_continuous(breaks=seq(-0.2, 0.15, 0.05), 
+                     limits=c(-0.2, 0.15)) + 
+  scale_y_continuous(breaks=seq(-0.3, 0.1, 0.1), 
+                     limits=c(-0.3, 0.1), 
+                     labels = scaleFUN1) +
+  scale_color_manual(values=c("#98C0C0", "#4A8088", "#EAA6B0", "#DB6160")) +
+  labs(x = "PC1 (25.9%)", y = "PC2 (8.0%)", color = "")+
+  guides(color = guide_legend(direction="horizontal"))
+
+season.legend <- cowplot::get_legend(PCA.biplot)
+
+PCA.biplot <- ggplot(PCA.scores.noSDL, 
+       aes(x = PC1, y = PC2, color = Season)) +
+  geom_point(alpha = 0.5, size = 3) + 
+  theme_linedraw()+
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")+
+  scale_x_continuous(breaks=seq(-0.2, 0.15, 0.05), 
+                     limits=c(-0.2, 0.15)) + 
+  scale_y_continuous(breaks=seq(-0.3, 0.1, 0.1), 
+                     limits=c(-0.3, 0.1), 
+                     labels = scaleFUN1) +
+  scale_color_manual(values=c("#98C0C0", "#4A8088", "#EAA6B0", "#DB6160")) +
+  labs(x = "PC1 (25.9%)", y = "PC2 (8.0%)", color = "Season")+
+  guides(color = "none")
+  
+(RDA.biplot + PCA.biplot) / season.legend +
+  plot_layout(heights = c(3.5, 0.25))#+
+  #plot_layout(guides = 'collect')+
+  #theme(legend.position = "bottom")
+
+ggsave("RDA_PCA biplot_noSDL_0323.pdf",width = 7, height = 4)
+```
+
+## Relationships of RDA and PCA variables with env variables
+
+```{r}
+# RDA vs environmental parameters
+ggplot(RDA.scores.noSDL, 
+       aes(x = Ant.Weekly.Total.Discharge.m3s, y = RDA1, color = avg.OC)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(y = "RDA1") + 
+  #scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  #scale_y_continuous(limits=c(-0.3, 0.2)) +
+  scale_color_cmocean(name = "matter", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")
+
+# RDA2 vs O/C
+ggplot(RDA.scores.noSDL, 
+       aes(x = avg.AImod, y = RDA2, color = Tidal.Stage)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(x = "Average O/C", y = "RDA2 (3.5%)", color = "Avg. O/C") + 
+  #scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  #scale_y_continuous(limits=c(-0.3, 0.2)) +
+  #scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8)) + 
+  scale_color_manual(values=c("#98C0C0", "#4A8088", "#EAA6B0", "#DB6160"))+
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")
+
+#ggsave("RDA2_OC_noSDL_0323.pdf",width = 6, height = 4)
+
+# RDA2 vs H/C
+ggplot(RDA.scores.noSDL, 
+       aes(x = Pred.cont.WL, y = RDA2, color = Tidal.Stage)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(x = "Average H/C", y = "RDA2 (3.5%)", color = "Avg. H/C") + 
+  #scale_x_continuous(limits=c(1.16, 1.22)) +
+  #scale_y_continuous(limits=c(-0.3, 0.2)) +
+  #scale_color_cmocean(name = "dense", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8), limits=c(1.16, 1.22), breaks = seq(1.16,1.22,0.02)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")
+
+ggsave("RDA2_HC_noSDL_0323.pdf",width = 6, height = 4)
+
+# PC1 vs time
+ggplotly(ggplot(RDA.scores.noSDL, 
+       aes(x = Datetime, y = RDA1, color = percS.formulas)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  labs(x = "Date") + 
+  scale_x_datetime(limits=c(as.POSIXct("2013-10-01"),
+                            as.POSIXct("2015-02-28")),
+                   breaks = (seq(as.POSIXct("2013-11-01"),
+                                 as.POSIXct("2015-02-01"), "3 months")),
+                   labels = scales::label_date("%b %Y")) +
+  #scale_y_continuous(limits=c(-0.2, 0.2)) +
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25)) + # limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()))
+
+ggsave("PC1_time_OC_0323.pdf",width = 6, height = 4)
+
+ggplot(filter(PCA.scores.noSDL, Sampling.Event == 22), 
+       aes(x = Datetime, y = Pred.cont.WL, color = PC1)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  labs(x = "Date", y = "Water level (rel. to MSL)", color = "PC1") + 
+  #scale_x_datetime(limits=c(as.POSIXct("2014-08-05 14:00:00"), as.POSIXct("2014-08-06 15:00:00")), breaks = (seq(as.POSIXct("2014-08-05 14:00:00"), as.POSIXct("2014-08-05 15:00:00"), "1 hour")))+
+                   #labels = scales::label_date("%b %Y")) +
+  scale_y_continuous(limits=c(-1.6, 1.6), breaks=seq(-1.5, 1.5, 0.5)) +
+  scale_color_cmocean(name = "balance", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(-0.2,0.2)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+ggsave("PC1_WL_1 tidal cycle_noSDL_0323.pdf",width = 6, height = 4)
+
+# RDA3
+ggplotly(ggplot(RDA.scores.noSDL, 
+       aes(x = Ant.Weekly.Total.Discharge.m3s, y = RDA1, color = avg.AImod, text = rownames(PCA.scores.noSDL))) +
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(x = "avg.OC", y = "PC1", color = "Salinity") + 
+  #scale_x_continuous(limits=c(20, 32), breaks=seq(20, 32, 4)) +
+  #scale_y_continuous(limits=c(-0.5,0.7), breaks=seq(-0.5,0.7,0.2)) +
+  scale_color_cmocean(name = "matter", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black"))  #, label.x = 20#
+  #facet_wrap(~Season)
+
+ggsave("RDA3_sal_season_noSDL_0323.pdf",width = 8, height = 6)
+
+# PC1 vs O/C
+ggplotly(ggplot(PCA.scores.noSDL, 
+       aes(x = avg.OC, y = PC1, color = Shannon)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  labs(x = "Average O/C", y = "PC1 (25.9%)") + 
+  scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  scale_y_continuous(limits=c(-0.2,0.2)) +
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black", label.x = 0.40))
+
+ggsave("PC1_OC_noSDL_0323.pdf",width = 6, height = 4)
+
+# avg O/C has an R of 0.96, avg NOSC has an R 0.9 -- some discrepancy
+
+# expression(I[DEG])
+
+# PC1 vs OC colored by ideg
+ggplot(RDA.scores.noSDL, 
+       aes(x = avg.OC, y = RDA3, color = ideg)) +
+  geom_point(size = 3, alpha = 0.7) + 
+  labs(x = "Intensity-weighted average O/C", 
+       #y = "PC1 (25.9%)", 
+       color = bquote(I[deg]), 
+       caption = bquote(I[deg]*"= degradation index from Flerus et al 2012")) + 
+  scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  #scale_y_continuous(limits=c(-0.2,0.2)) +
+  scale_color_cmocean(name = "ice", direction=-1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits=c(0.3, 0.56), breaks=seq(0.3, 0.55, 0.05)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black") + 
+  annotate("text", x = 0.34, y = 0.095, label = "Reduced \nporewater?", size = 3.25) +
+  annotate("text", x = 0.41, y = -0.17, label = "Oxidized \nwater column?", size = 3.25)
+
+ggsave("PC1_OC_ideg.pdf", width = 6, height = 4)
+
+# PC2 vs IoS
+ggplot(PCA.scores.noSDL, 
+       aes(x = Shannon, y = PC2, color = avg.mass)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(x = "Island of Stability (%)", y = "PC2 (8.0%)", color = "Avg. O/C") + 
+  #scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  #scale_y_continuous(limits=c(-0.2,0.1)) +
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25)) + #limits = c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")
+```
+
+## RDA Correlations
+
+```{r}
+# RDA1 and env variables
+ggpairs(RDA.scores.noSDL,
+        columns = c(38,5,7,9,16:17),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA1", "Salinity", "Water temperature","Water level", "Weekly discharge", "Daylength")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA1_env_corr_0423.pdf", width = 10, height = 8)
+
+# RDA1 and avg molecular traits
+ggpairs(RDA.scores.noSDL,
+        columns = c(37,20:26),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA1", "Avg. mass", "Avg. H/C", "Avg. O/C", "Avg. S", "Avg. AImod", "Avg. DBE", "Avg. NOSC")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA1_mol_corr_0423.pdf", width = 12, height = 8)
+
+# RDA1 and indices
+ggpairs(RDA.scores.noSDL,
+        columns = c(37,27:30),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA1", "Ideg", "Island of stability %", "Iterr", "Imap")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA1_indices_corr_0423.pdf", width = 10, height = 8)
+
+# RDA1 and diversity metrics
+ggpairs(RDA.scores.noSDL,
+        columns = c(37,31:36),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA1", "Shannon", "Simpson", "Chao1", "Elemental comp.", "Reactivity", "Insaturation & aromaticity")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA1_div_corr_0423.pdf", width = 11, height = 8)
+
+# RDA2 and env variables
+ggpairs(RDA.scores.noSDL,
+        columns = c(39,5,7,9,16:17),
+        aes(color = Season,
+            alpha = 0.5), 
+        columnLabels = c("RDA2", "Salinity", "Water temperature", "Water level", "Weekly discharge", "Daylength")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA2_env_corr_0423.pdf", width = 10, height = 8)
+
+# RDA2 and avg molecular traits
+ggpairs(RDA.scores.noSDL,
+        columns = c(38,20:26),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA2", "Avg. mass", "Avg. H/C", "Avg. O/C", "Avg. S", "Avg. AImod", "Avg. DBE", "Avg. NOSC")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA2_mol_corr_0423.pdf", width = 12, height = 8)
+
+# RDA2 and indices
+ggpairs(RDA.scores.noSDL,
+        columns = c(38,27:30),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA2", "Ideg", "Island of stability %", "Iterr", "Imap")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA2_indices_corr_0423.pdf", width = 10, height = 8)
+
+# RDA2 and diversity metrics
+ggpairs(RDA.scores.noSDL,
+        columns = c(38,31:36),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA2", "Shannon", "Simpson", "Chao1", "Elemental comp.", "Reactivity", "Insaturation and aromaticity")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA2_div_corr_0423.pdf", width = 11, height = 8)
+
+# RDA3 and env variables
+ggpairs(RDA.scores.noSDL,
+        columns = c(40,5,7,9,16:17),
+        aes(color = Season,
+            alpha = 0.5), 
+        columnLabels = c("RDA3", "Salinity", "Water temperature", "Water level", "Weekly discharge", "Daylength")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA3_env_corr_0423.pdf", width = 10, height = 8)
+
+# RDA3 and avg molecular traits
+ggpairs(RDA.scores.noSDL,
+        columns = c(39,20:26),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA3", "Avg. mass", "Avg. H/C", "Avg. O/C", "Avg. S", "Avg. AImod", "Avg. DBE", "Avg. NOSC")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA3_mol_corr_0423.pdf", width = 12, height = 8)
+
+# RDA3 and indices
+ggpairs(RDA.scores.noSDL,
+        columns = c(39,27:30),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA3", "Ideg", "Island of stability %", "Iterr", "Imap")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA3_indices_corr_0423.pdf", width = 10, height = 8)
+
+# RDA3 and diversity metrics
+ggpairs(RDA.scores.noSDL,
+        columns = c(39,31:36),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA3", "Shannon", "Simpson", "Chao1", "Elemental comp.", "Reactivity", "Insaturation and aromaticity")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("RDA3_div_corr_0423.pdf", width = 11, height = 8)
+
+## redoing Simpson with outliers excluded
+
+ggplot(RDA.scores.noSDL, 
+       aes(x = Gini_Simpson, y = RDA3)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  labs(x = "Simpson") + 
+  scale_x_continuous(limits = c(0.999, 0.9993)) +
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black", digits = 3)
+
+RDA.scores.noSDL<- cbind(RDA.scores.noSDL[1:23], percS.samples.RDA, RDA.scores.noSDL[24:42])
+
+ggpairs(RDA.scores.noSDL,
+        columns = c(24,38:40),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("%S containing formulas", "RDA1", "RDA2", "RDA3")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+```
+
+## PCA Correlations
+
+```{r}
+# PC1 and avg molecular traits
+ggpairs(PCA.scores.noSDL,
+        columns = c(37,20:26),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC1", "Avg. mass", "Avg. H/C", "Avg. O/C", "Avg. S", "Avg. AImod", "Avg. DBE", "Avg. NOSC")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("PC1_mol_corr_0423.pdf", width = 12, height = 8)
+
+# PC1 and indices
+ggpairs(PCA.scores.noSDL,
+        columns = c(37,27:30),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC1", "Ideg", "Island of stability %", "Iterr", "Imap")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("PC1_indices_corr_0423.pdf", width = 10, height = 8)
+
+# PC1 and diversity metrics
+ggpairs(PCA.scores.noSDL,
+        columns = c(37,31:36),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC1", "Shannon", "Simpson", "Chao1", "Elemental comp.", "Reactivity", "Insaturation and aromaticity")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("PC1_div_corr_0423.pdf", width = 11, height = 8)
+
+# PC2 and avg molecular traits
+ggpairs(PCA.scores.noSDL,
+        columns = c(38,20:26),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC2", "Avg. mass", "Avg. H/C", "Avg. O/C", "Avg. S", "Avg. AImod", "Avg. DBE", "Avg. NOSC")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("PC2_mol_corr_0423.pdf", width = 12, height = 8)
+
+# PC2 and indices
+ggpairs(PCA.scores.noSDL,
+        columns = c(38,27:30),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC2", "Ideg", "Island of stability %", "Iterr", "Imap")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("PC2_indices_corr_0423.pdf", width = 10, height = 8)
+
+# PC2 and diversity metrics
+ggpairs(PCA.scores.noSDL,
+        columns = c(38,31:36),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC2", "Shannon", "Simpson", "Chao1", "Elemental comp.", "Reactivity", "Insaturation and aromaticity")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggsave("PC2_div_corr_0423.pdf", width = 11, height = 8)
+
+## redoing Simpson with outliers excluded
+
+ggplot(PCA.scores.noSDL, 
+       aes(x = avg.OC, y = PC1, color = avg.mass)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+ # labs(x = "Simpson") + 
+ # scale_x_continuous(limits = c(0.999, 0.9993)) +
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black", digits = 3)
+
+PCA.scores.noSDL <- cbind(PCA.scores.noSDL[1:23], percS.samples.RDA, PCA.scores.noSDL[24:41])
+
+ggpairs(PCA.scores.noSDL,
+        columns = c(24,38:39),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("%S containing formulas", "PC1", "PC2")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+```
+
+## Constrained van Krevelen's
+
+```{r}
+# RDA1 VK -- 4430
+ggplot(RDA.corr.noSDL, 
+       aes(x = OC, y = HC, color = RDA1)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.045, 0.045),breaks=seq(-0.04, 0.04, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5)) #+
+  #geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA1 vk_noSDL_0323.pdf",width = 6, height = 4)
+
+# RDA2 VK -- 4426
+ggplot(RDA.corr.noSDL, aes(x = OC, y = HC, color = RDA2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.05, 0.05),breaks=seq(-0.05, 0.05, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5)) #+
+  #geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA2 vk_noSDL_0323.pdf",width = 6, height = 4)
+
+# RDA3 VK -- 4431
+ggplot(RDA.corr.noSDL, aes(x = OC, y = HC, color = RDA3)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.055, 0.055),breaks=seq(-0.05, 0.05, 0.025),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5)) #+
+  #geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA3 vk_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+## Unconstrained van Krevelen's
+
+```{r}
+# PC1 VK -- 4431
+ggplot(filter(PCA.corr.noSDL), aes(x = OC, y = HC, color = PC1)) + 
+  geom_point(size = 3, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.04, 0.04),breaks=seq(-0.04, 0.04, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))
+  # geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash", color = "black") +
+  # geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash", color = "black") +
+  # geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash", color = "black")
+
+ggsave("PC1 vk_noSDL_0323.pdf",width = 6, height = 4)
+
+# PC2 VK -- 4427
+
+ggplot(PCA.corr.noSDL, aes(x = O.C, y = H.C, color = PC2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.05, 0.05),breaks=seq(-0.05, 0.05, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5)) #+
+  #geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash") +
+  #geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("PC2 vk_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+## Positive and negative RDA and PCA VK loadings
+
+```{r}
+RDA.corr.noSDL$RDA1_corr <- character(length(RDA.corr.noSDL$RDA1))
+RDA.corr.noSDL$RDA2_corr <- character(length(RDA.corr.noSDL$RDA2))
+RDA.corr.noSDL$RDA3_corr <- character(length(RDA.corr.noSDL$RDA3))
+
+for (i in 1:length(RDA.corr.noSDL$RDA1)) {
+  ifelse(RDA.corr.noSDL$RDA1[i] < 0, RDA.corr.noSDL$RDA1_corr[i] <- "x < 0", ifelse(RDA.corr.noSDL$RDA1[i] > 0, RDA.corr.noSDL$RDA1_corr[i] <- "x > 0", RDA.corr.noSDL$RDA1_corr[i] <- "x = 0"))
+}
+
+for (i in 1:length(RDA.corr.noSDL$RDA2)) {
+  ifelse(RDA.corr.noSDL$RDA2[i] < 0, RDA.corr.noSDL$RDA2_corr[i] <- "x < 0", ifelse(RDA.corr.noSDL$RDA2[i] > 0, RDA.corr.noSDL$RDA2_corr[i] <- "x > 0", RDA.corr.noSDL$RDA2_corr[i] <- "x = 0"))
+}
+
+for (i in 1:length(RDA.corr.noSDL$RDA3)) {
+  ifelse(RDA.corr.noSDL$RDA3[i] < 0, RDA.corr.noSDL$RDA3_corr[i] <- "x < 0", ifelse(RDA.corr.noSDL$RDA3[i] > 0, RDA.corr.noSDL$RDA3_corr[i] <- "x > 0", RDA.corr.noSDL$RDA3_corr[i] <- "x = 0"))
+}
+
+PCA.corr.noSDL$PC1_corr <- character(length(PCA.corr.noSDL$PC1))
+PCA.corr.noSDL$PC2_corr <- character(length(PCA.corr.noSDL$PC2))
+
+for (i in 1:length(PCA.corr.noSDL$PC1)) {
+  ifelse(PCA.corr.noSDL$PC1[i] < 0, PCA.corr.noSDL$PC1_corr[i] <- "x < 0", 
+         ifelse(PCA.corr.noSDL$PC1[i] > 0, PCA.corr.noSDL$PC1_corr[i] <- "x > 0", PCA.corr.noSDL$PC1_corr[i] <- "x = 0"))
+}
+
+for (i in 1:length(PCA.corr.noSDL$PC2)) {
+  ifelse(PCA.corr.noSDL$PC2[i] < 0, PCA.corr.noSDL$PC2_corr[i] <- "x < 0", 
+         ifelse(PCA.corr.noSDL$PC2[i] > 0, PCA.corr.noSDL$PC2_corr[i] <- "x > 0", PCA.corr.noSDL$PC2_corr[i] <- "x = 0"))
+}
+```
+
+### 20% most positive and negative RDA1 VK
+
+```{r}
+# 20% most positive RDA1 peaks
+count(RDA.corr.noSDL %>% 
+  filter(RDA1_corr == "x > 0") %>% 
+  slice_max(RDA1, prop = 0.2)) # 432
+
+count(RDA.corr.noSDL %>% 
+  filter(S == 1) %>% 
+    filter(N == 1))
+
+RDA1.top20 <- RDA.corr.noSDL %>% 
+  filter(RDA1_corr == "x > 0") %>% 
+  slice_max(RDA1, prop = 0.2)
+
+mean(RDA1.top20$reference) # 453.4135
+sd(RDA1.top20$reference) # 138.7629
+
+mean(RDA1.top20$HC) # 1.099787
+sd(RDA1.top20$HC) # 0.2453897
+
+mean(RDA1.top20$OC) # 0.4603032
+sd(RDA1.top20$OC) # 0.1354141
+
+mean(RDA1.top20$NOSC)
+sd(RDA1.top20$NOSC)
+
+mean(RDA1.top20$S / RDA1.top20$C) # 0.000462963
+sd(RDA1.top20$S / RDA1.top20$C) # 0.005542651
+
+mean(RDA1.top20$S / RDA1.top20$O) # 0.001427469
+sd(RDA1.top20$S / RDA1.top20$O) # 0.01732704
+
+# %S containing formulas
+(count(RDA1.top20 %>% 
+  filter(S > 0)) / length(RDA1.top20$C)) * 100
+
+table(RDA1.top20$core) # 137 / 432
+table(RDA1.top20$CRAM.like) # 334 / 432
+table(RDA1.top20$IOS.like) # 54 / 432
+table(RDA1.top20$lignin.like) # 122 / 432
+table(RDA1.top20$tannin.like) # 276 / 432
+
+mean(RDA1.top20$AImod) # 0.3584722
+sd(RDA1.top20$AImod) # 0.1525118
+
+mean(RDA1.top20$DBE) # 10.7963
+sd(RDA1.top20$DBE) # 3.420314
+
+table(RDA1.top20$compound_class)
+
+ggplot(RDA.corr.noSDL %>% 
+          filter(RDA1_corr == "x > 0") %>% 
+          slice_max(RDA1, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = RDA1)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.045, 0.045),breaks=seq(-0.04, 0.04, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA1 vk h20_noSDL_0323.pdf",width = 6, height = 4)
+
+# 20% most negative RDA1 peaks
+count(RDA.corr.noSDL %>% 
+  filter(RDA1_corr == "x < 0") %>% 
+  slice_min(RDA1, prop = 0.2)) # 453 -- 452 in VK
+
+RDA1.bottom20 <- RDA.corr.noSDL %>% 
+  filter(RDA1_corr == "x < 0") %>% 
+  slice_min(RDA1, prop = 0.2)
+
+mean(RDA1.bottom20$reference) # 289.4504
+sd(RDA1.bottom20$reference) # 76.04826
+
+mean(RDA1.bottom20$HC) # 1.16219
+sd(RDA1.bottom20$HC) # 0.2370883
+
+mean(RDA1.bottom20$OC) # 0.3890464
+sd(RDA1.bottom20$OC) # 0.1316769
+
+mean(RDA1.bottom20$NOSC)
+sd(RDA1.bottom20$NOSC)
+
+wilcox.test(RDA1.top20$NOSC,RDA1.bottom20$NOSC)
+
+mean(RDA1.bottom20$S / RDA1.bottom20$C) # 0.06488885
+sd(RDA1.bottom20$S / RDA1.bottom20$C) # 0.1083039
+
+mean(RDA1.bottom20$S / RDA1.bottom20$O) # 0.02607079
+sd(RDA1.bottom20$S / RDA1.bottom20$O) # 0.03645357
+
+# %S containing formulas
+(count(RDA1.bottom20 %>% 
+  filter(S > 0)) / length(RDA1.bottom20$C)) * 100
+
+table(RDA1.bottom20$core) # 69 / 453
+table(RDA1.bottom20$CRAM.like) # 0 / 453
+table(RDA1.bottom20$IOS.like) # 42 / 453
+table(RDA1.bottom20$lignin.like) # 83 / 453
+table(RDA1.bottom20$tannin.like) # 183 / 453
+
+sum(RDA1.bottom20$S > 0) # number of S containing formulas -- 161
+length(RDA1.bottom20$S) # total formulas in bottom 20% for PC1 -- 453
+sum(RDA1.top20$S > 0) # number of S containing formulas -- 3
+length(RDA1.top20$S) # total formulas in top 20% for RDA3 -- 432
+prop.test(x = c(161,3), n = c(453,432))
+
+mean(RDA1.bottom20$S) # 0.3554084
+sd(RDA1.bottom20$S) # 0.08313976
+
+mean(RDA1.bottom20$AImod) # 0.3371965
+sd(RDA1.bottom20$AImod) # 0.199816
+
+mean(RDA1.bottom20$DBE) # 7.048565
+sd(RDA1.bottom20$DBE) # 1.752957
+
+table(RDA1.bottom20$compound_class)
+# condensed aromatics
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Condensed aromatic (black carbon)"), sum(RDA1.top20$compound_class=="Condensed aromatic (black carbon)")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class)))
+# polyphenols
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Aromatic (polyphenol)"), sum(RDA1.top20$compound_class=="Aromatic (polyphenol)")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class)))
+# highly unsaturated aliphatics
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Highly unsaturated"), sum(RDA1.top20$compound_class=="Highly unsaturated")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class)))
+# unsaturated aliphatics
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Unsaturated aliphatic"), sum(RDA1.top20$compound_class=="Unsaturated aliphatic")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class)))
+# fatty acids
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Saturated fatty acid"), sum(RDA1.top20$compound_class=="Saturated fatty acid")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class)))
+# sugars
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Sugar"), sum(RDA1.top20$compound_class=="Sugar")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class))) # no sugars
+# peptides
+prop.test(x = c(sum(RDA1.bottom20$compound_class=="Peptide"), sum(RDA1.top20$compound_class=="Peptide")), n = c(length(RDA1.bottom20$compound_class),length(RDA1.top20$compound_class)))
+
+ggplot(RDA.corr.noSDL %>% 
+          filter(RDA1_corr == "x < 0") %>% 
+          slice_min(RDA1, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = RDA1)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.045, 0.045),breaks=seq(-0.04, 0.04, 0.02), values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.15, y = 1.62, label = "aliphatic", size = 3)+
+  #annotate("text", x = 1.058, y = 1.4, label = "highly unsaturated", size = 3)+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.1, y = 0.62, label = "polyphenols", size = 3, angle = 352)+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+  #annotate("text", x = 1.01, y = 0.3, label = "condensed aromatics", size = 3, angle = 352)
+
+ggsave("RDA1 vk l20_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+### 20% most positive and negative RDA2 VK
+
+```{r}
+# 20% most positive RDA2 peaks
+count(RDA.corr.noSDL %>% 
+  filter(RDA2_corr == "x > 0") %>% 
+  slice_max(RDA2, prop = 0.2)) # 439
+
+RDA2.top20 <- RDA.corr.noSDL %>% 
+  filter(RDA2_corr == "x > 0") %>% 
+  slice_max(RDA2, prop = 0.2)
+
+mean(RDA2.top20$reference) # 406.9574
+sd(RDA2.top20$reference) # 78.02356
+
+mean(RDA2.top20$HC) # 1.250756
+sd(RDA2.top20$HC) # 0.209607
+
+mean(RDA2.top20$OC) # 0.3667494
+sd(RDA2.top20$OC) # 0.1050121
+
+mean(RDA2.top20$NOSC)
+sd(RDA2.top20$NOSC)
+
+mean(RDA2.top20$S / RDA2.top20$C) # 0.006857518
+sd(RDA2.top20$S / RDA2.top20$C) # 0.01561268
+
+# %S containing formulas
+(count(RDA2.top20 %>% 
+  filter(S > 0)) / length(RDA2.top20$C)) * 100
+
+table(RDA2.top20$core) # 168 / 439
+table(RDA2.top20$CRAM.like) # 120 / 439
+table(RDA2.top20$IOS.like) # 54 / 439
+table(RDA2.top20$lignin.like) # 180 / 439
+table(RDA2.top20$tannin.like) # 205 / 439
+
+mean(RDA2.top20$S) # 0.166287
+sd(RDA2.top20$S) # 0.3727629
+
+mean(RDA2.top20$AImod) # 0.2721412
+sd(RDA2.top20$AImod) # 0.1470159
+
+mean(RDA2.top20$DBE) # 9.225513
+sd(RDA2.top20$DBE) # 3.169012
+
+table(RDA2.top20$compound_class)
+
+ggplot(RDA.corr.noSDL %>% 
+          filter(RDA2_corr == "x > 0") %>% 
+          slice_max(RDA2, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = RDA2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.05, 0.05),breaks=seq(-0.05, 0.05, 0.02), values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5)) +
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA2 vk h20_noSDL_0323.pdf",width = 6, height = 4)
+
+# 20% most negative RDA2 peaks
+count(RDA.corr.noSDL %>% 
+  filter(RDA2_corr == "x < 0") %>% 
+  slice_min(RDA2, prop = 0.2)) # 446 -- 441 in VK
+
+RDA2.bottom20 <- RDA.corr.noSDL %>% 
+  filter(RDA2_corr == "x < 0") %>% 
+  slice_min(RDA2, prop = 0.2)
+
+mean(RDA2.bottom20$reference) # 336.8015
+sd(RDA2.bottom20$reference) # 91.32845
+
+mean(RDA2.bottom20$HC) # 0.8861816
+sd(RDA2.bottom20$HC) # 0.3210731
+
+mean(RDA2.bottom20$OC) # 0.4491592
+sd(RDA2.bottom20$OC) # 0.1229587
+
+mean(RDA2.bottom20$NOSC)
+sd(RDA2.bottom20$NOSC)
+
+wilcox.test(RDA2.top20$NOSC,RDA2.bottom20$NOSC)
+
+mean(RDA2.bottom20$S / RDA2.bottom20$C) # 0.01646848
+sd(RDA2.bottom20$S / RDA2.bottom20$C) # 0.03428668
+
+# %S containing formulas
+(count(RDA2.bottom20 %>% 
+  filter(S > 0)) / length(RDA2.bottom20$C)) * 100
+
+table(RDA2.bottom20$core) # 87 / 446
+table(RDA2.bottom20$CRAM.like) # 122 / 446
+table(RDA2.bottom20$IOS.like) # 6 / 446
+table(RDA2.bottom20$lignin.like) # 2 / 446
+table(RDA2.bottom20$tannin.like) # 220 / 446
+
+sum(RDA2.bottom20$S > 0) # number of S containing formulas -- 87
+length(RDA2.bottom20$S) # total formulas in bottom 20% for PC1 -- 446
+sum(RDA2.top20$S > 0) # number of S containing formulas -- 73
+length(RDA2.top20$S) # total formulas in top 20% for RDA3 -- 439
+prop.test(x = c(87,73), n = c(446,439))
+
+mean(RDA2.bottom20$S) # 0.1950673
+sd(RDA2.bottom20$S) # 0.3966975
+
+mean(RDA2.bottom20$AImod) # 0.512713
+sd(RDA2.bottom20$AImod) # 0.1849046
+
+mean(RDA2.bottom20$DBE) # 10.22422
+sd(RDA2.bottom20$DBE) # 3.528879
+
+table(RDA2.bottom20$compound_class)
+
+# condensed aromatics
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Condensed aromatic (black carbon)"), sum(RDA2.top20$compound_class=="Condensed aromatic (black carbon)")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+# polyphenols
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Aromatic (polyphenol)"), sum(RDA2.top20$compound_class=="Aromatic (polyphenol)")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+# highly unsaturated aliphatics
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Highly unsaturated"), sum(RDA2.top20$compound_class=="Highly unsaturated")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+# unsaturated aliphatics
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Unsaturated aliphatic"), sum(RDA2.top20$compound_class=="Unsaturated aliphatic")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+# fatty acids
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Saturated fatty acid"), sum(RDA2.top20$compound_class=="Saturated fatty acid")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+# sugars
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Sugar"), sum(RDA2.top20$compound_class=="Sugar")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+# peptides
+prop.test(x = c(sum(RDA2.bottom20$compound_class=="Peptide"), sum(RDA2.top20$compound_class=="Peptide")), n = c(length(RDA2.bottom20$compound_class),length(RDA2.top20$compound_class)))
+
+ggplot(RDA.corr.noSDL %>% 
+          filter(RDA2_corr == "x < 0") %>% 
+          slice_min(RDA2, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = RDA2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.05, 0.05),breaks=seq(-0.05, 0.05, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash") +
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash") +
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA2 vk l20_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+### 20% most positive and negative RDA3 VK
+
+```{r}
+# 20% most positive RDA3 peaks
+count(RDA.corr.noSDL %>% 
+  filter(RDA3_corr == "x > 0") %>% 
+  slice_max(RDA3, prop = 0.2)) # 398
+
+RDA3.top20 <- RDA.corr.noSDL %>% 
+  filter(RDA3_corr == "x > 0") %>% 
+  slice_max(RDA3, prop = 0.2)
+
+mean(RDA3.top20$reference) # 404.424
+sd(RDA3.top20$reference) # 61.28971
+
+mean(RDA3.top20$HC) # 1.188314
+sd(RDA3.top20$HC) # 0.1893458
+
+mean(RDA3.top20$OC) # 0.5463693
+sd(RDA3.top20$OC) # 0.1045526
+
+mean(RDA3.top20$NOSC)
+sd(RDA3.top20$NOSC)
+
+mean(RDA3.top20$S) # 0.07286432
+sd(RDA3.top20$S) # 0.2602408
+
+# %S containing formulas
+(count(RDA3.top20 %>% 
+  filter(S > 0)) / length(RDA3.top20$C)) * 100
+
+table(RDA3.top20$core) # 177 / 398
+table(RDA3.top20$CRAM.like) # 138 / 398
+table(RDA3.top20$IOS.like) # 171 / 398
+table(RDA3.top20$lignin.like) # 95 / 398
+table(RDA3.top20$tannin.like) # 353 / 398
+
+mean(RDA3.top20$S / RDA3.top20$C) # 0.005064411
+sd(RDA3.top20$S / RDA3.top20$C) # 0.01895108
+
+mean(RDA3.top20$AImod) # 0.2474874
+sd(RDA3.top20$AImod) # 0.1252895
+
+mean(RDA3.top20$DBE) # 8.59799
+sd(RDA3.top20$DBE) # 2.08127
+
+table(RDA3.top20$compound_class)
+
+ggplot(RDA.corr.noSDL %>% 
+          filter(RDA3_corr == "x > 0") %>% 
+          slice_max(RDA3, prop = 0.2), 
+       aes(x = OC, y =  HC, color = RDA3)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.055, 0.055),breaks=seq(-0.05, 0.05, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("RDA3 vk h20_noSDL_0323.pdf",width = 6, height = 4)
+
+# 20% most negative RDA1 peaks
+count(RDA.corr.noSDL %>% 
+  filter(RDA3_corr == "x < 0") %>% 
+  slice_min(RDA3, prop = 0.2)) # 487
+
+RDA3.bottom20 <- RDA.corr.noSDL %>% 
+  filter(RDA3_corr == "x < 0") %>% 
+  slice_min(RDA3, prop = 0.2)
+
+mean(RDA3.bottom20$reference) # 361.3584
+sd(RDA3.bottom20$reference) # 115.6518
+
+mean(RDA3.bottom20$HC) # 1.162842
+sd(RDA3.bottom20$HC) # 0.372802
+
+mean(RDA3.bottom20$OC) # 0.2496694
+sd(RDA3.bottom20$OC) # 0.1185496
+
+mean(RDA3.bottom20$NOSC)
+sd(RDA3.bottom20$NOSC)
+
+mean(RDA3.bottom20$S / RDA3.bottom20$C) # 0.01013257
+sd(RDA3.bottom20$S / RDA3.bottom20$C) # 0.02215076
+
+wilcox.test(RDA3.top20$NOSC,RDA3.bottom20$NOSC)
+
+# %S containing formulas
+(count(RDA3.bottom20 %>% 
+  filter(S > 0)) / length(RDA3.bottom20$C)) * 100
+
+table(RDA3.bottom20$core) # 145 / 487
+table(RDA3.bottom20$CRAM.like) # 151 / 487
+table(RDA3.bottom20$IOS.like) # 0 / 487
+table(RDA3.bottom20$lignin.like) # 17 / 487
+table(RDA3.bottom20$tannin.like) # 33 / 487
+
+sum(RDA3.bottom20$S > 0) # number of S containing formulas -- 90
+length(RDA3.bottom20$S) # total formulas in bottom 20% for PC1 -- 487
+sum(RDA3.top20$S > 0) # number of S containing formulas -- 29
+length(RDA3.top20$S) # total formulas in top 20% for RDA3 -- 398
+prop.test(x = c(90,29), n = c(487,398))
+
+mean(RDA3.bottom20$S) # 0.1848049
+sd(RDA3.bottom20$S) # 0.3885384
+
+mean(RDA3.bottom20$AImod) # 0.3905339
+sd(RDA3.bottom20$AImod) # 0.2262535
+
+mean(RDA3.bottom20$DBE) # 9.338809
+sd(RDA3.bottom20$DBE) # 3.486333
+
+table(RDA3.bottom20$compound_class)
+
+# condensed aromatics
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Condensed aromatic (black carbon)"), sum(RDA3.top20$compound_class=="Condensed aromatic (black carbon)")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class)))
+# polyphenols
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Aromatic (polyphenol)"), sum(RDA3.top20$compound_class=="Aromatic (polyphenol)")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class)))
+# highly unsaturated aliphatics
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Highly unsaturated"), sum(RDA3.top20$compound_class=="Highly unsaturated")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class)))
+# unsaturated aliphatics
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Unsaturated aliphatic"), sum(RDA3.top20$compound_class=="Unsaturated aliphatic")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class)))
+# fatty acids
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Saturated fatty acid"), sum(RDA3.top20$compound_class=="Saturated fatty acid")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class)))
+# sugars
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Sugar"), sum(RDA3.top20$compound_class=="Sugar")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class))) 
+# peptides
+prop.test(x = c(sum(RDA3.bottom20$compound_class=="Peptide"), sum(RDA3.top20$compound_class=="Peptide")), n = c(length(RDA3.bottom20$compound_class),length(RDA3.top20$compound_class))) # no peptides
+
+ggplot(RDA.corr.noSDL %>% 
+          filter(RDA3_corr == "x < 0") %>% 
+          slice_min(RDA3, prop = 0.2), 
+       aes(x = OC, y =  HC, color = RDA3)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.055, 0.055),breaks=seq(-0.05, 0.05, 0.02), values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.15, y = 1.62, label = "aliphatic", size = 3)+
+  #annotate("text", x = 1.058, y = 1.4, label = "highly unsaturated", size = 3)+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.1, y = 0.62, label = "polyphenols", size = 3, angle = 352)+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+  #annotate("text", x = 1.01, y = 0.3, label = "condensed aromatics", size = 3, angle = 352)
+
+ggsave("RDA3 vk l20_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+
+### 20% most positive and negative PC1 VK
+
+```{r}
+# 20% most positive PC1 peaks
+count(PCA.corr.noSDL %>% 
+  filter(PC1_corr == "x > 0") %>% 
+  slice_max(PC1, prop = 0.2)) # 432
+
+PC1.top20 <- PCA.corr.noSDL %>% 
+  filter(PC1_corr == "x > 0") %>% 
+  slice_max(PC1, prop = 0.2)
+
+mean(PC1.top20$reference) # 345.7135
+sd(PC1.top20$reference) # 81.46778
+
+mean(PC1.top20$HC) # 1.054766
+sd(PC1.top20$HC) # 0.3715286
+
+mean(PC1.top20$OC) # 0.1853843
+sd(PC1.top20$OC) # 0.135178
+
+mean(PC1.top20$NOSC)
+sd(PC1.top20$NOSC)
+
+mean(PC1.top20$S / PC1.top20$C) # 0.02081394
+sd(PC1.top20$S / PC1.top20$C) # 0.02362328
+
+mean(PC1.top20$S / PC1.top20$O) # oops - doesn't work, 24 formulas without oxygen...what if i take them out
+SO.test <- subset(PC1.top20, O > 0)
+mean(SO.test$S / SO.test$O)
+sd(SO.test$S / SO.test$O)
+
+# %S containing formulas
+(count(PC1.top20 %>% 
+  filter(S > 0)) / length(PC1.top20$C)) * 100
+
+table(PC1.top20$core) # 88 / 432
+table(PC1.top20$CRAM.like) # 50 / 432
+table(PC1.top20$IOS.like) # 0 / 432
+table(PC1.top20$lignin.like) # 0 / 432
+table(PC1.top20$tannin.like) # 0 / 432
+
+mean(PC1.top20$S) # 0.4467593
+sd(PC1.top20$S) # 0.4977338
+
+mean(PC1.top20$AImod) # 0.4666667
+sd(PC1.top20$AImod) # 0.2017004
+
+mean(PC1.top20$DBE) # 10.93287
+sd(PC1.top20$DBE) # 4.053887
+
+table(PC1.top20$compound_class)
+
+ggplot(PCA.corr.noSDL %>% 
+          filter(PC1_corr == "x > 0") %>% 
+          slice_max(PC1, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = PC1)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.04, 0.04),breaks=seq(-0.04, 0.04, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash") +
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash") +
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("PC1 vk h20_noSDL_0323.pdf",width = 6, height = 4)
+
+# 20% most negative PC1 peaks
+count(PCA.corr.noSDL %>% 
+          filter(PC1_corr == "x < 0") %>% 
+          slice_min(PC1, prop = 0.2)) # 454
+
+PC1.bottom20 <- PCA.corr.noSDL %>% 
+  filter(PC1_corr == "x < 0") %>% 
+  slice_min(PC1, prop = 0.2)
+
+mean(PC1.bottom20$reference) # 472.6442
+sd(PC1.bottom20$reference) # 77.10514
+
+mean(PC1.bottom20$HC) # 1.141914
+sd(PC1.bottom20$HC) # 0.1634062
+
+mean(PC1.bottom20$OC) # 0.5736322
+sd(PC1.bottom20$OC) # 0.07483146
+
+mean(PC1.bottom20$NOSC)
+sd(PC1.bottom20$NOSC)
+
+mean(PC1.bottom20$S / PC1.bottom20$C) # 0.002094658
+sd(PC1.bottom20$S / PC1.bottom20$C) # 0.01037332
+
+# %S containing formulas
+(count(PC1.bottom20 %>% 
+  filter(S > 0)) / length(PC1.bottom20$C)) * 100
+
+table(PC1.bottom20$core) # 155 / 454
+table(PC1.bottom20$CRAM.like) # 203 / 454
+table(PC1.bottom20$IOS.like) # 197 / 454
+table(PC1.bottom20$lignin.like) # 43 / 454
+table(PC1.bottom20$tannin.like) # 424 / 454
+
+sum(PC1.bottom20$S > 0) # number of S containing formulas -- 18
+length(PC1.bottom20$S) # total formulas in bottom 20% for PC1 -- 454
+sum(PC1.top20$S > 0) # number of S containing formulas -- 193
+length(PC1.top20$S) # total formulas in top 20% for RDA3 -- 432
+prop.test(x = c(18,193), n = c(454,432))
+
+mean(PC1.bottom20$S / PC1.bottom20$O)
+
+mean(PC1.bottom20$S) # 0.03964758
+sd(PC1.bottom20$S) # 0.1953451
+
+mean(PC1.bottom20$AImod) # 0.2602423
+sd(PC1.bottom20$AImod) # 0.1203864
+
+mean(PC1.bottom20$DBE) # 10.163
+sd(PC1.bottom20$DBE) # 2.437718
+
+table(PC1.bottom20$compound_class)
+wilcox.test(PC1.top20$NOSC,PC1.bottom20$NOSC)
+
+# condensed aromatics
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Condensed aromatic (black carbon)"), sum(PC1.top20$compound_class=="Condensed aromatic (black carbon)")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class)))
+# polyphenols
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Aromatic (polyphenol)"), sum(PC1.top20$compound_class=="Aromatic (polyphenol)")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class)))
+# highly unsaturated aliphatics
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Highly unsaturated"), sum(PC1.top20$compound_class=="Highly unsaturated")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class)))
+# unsaturated aliphatics
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Unsaturated aliphatic"), sum(PC1.top20$compound_class=="Unsaturated aliphatic")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class)))
+# fatty acids
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Saturated fatty acid"), sum(PC1.top20$compound_class=="Saturated fatty acid")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class)))
+# sugars
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Sugar"), sum(PC1.top20$compound_class=="Sugar")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class))) 
+# peptides
+prop.test(x = c(sum(PC1.bottom20$compound_class=="Peptide"), sum(PC1.top20$compound_class=="Peptide")), n = c(length(PC1.bottom20$compound_class),length(PC1.top20$compound_class))) # no peptides
+
+ggplot(PCA.corr.noSDL %>% 
+          filter(PC1_corr == "x < 0") %>% 
+          slice_min(PC1, prop = 0.2), 
+       aes(x = OC, y =  HC, color = PC1)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.04, 0.04),breaks=seq(-0.04, 0.04, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("PC1 vk l20_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+### 20% most positive and negative PC2 VK
+
+```{r}
+# 20% most positive PC2 peaks
+count(PCA.corr.noSDL %>% 
+  filter(PC2_corr == "x > 0") %>% 
+  slice_max(PC2, prop = 0.2)) # 399
+
+PC2.top20 <- PCA.corr.noSDL %>% 
+  filter(PC2_corr == "x > 0") %>% 
+  slice_max(PC2, prop = 0.2)
+
+mean(PC2.top20$reference) # 350.6811
+sd(PC2.top20$reference) # 68.362
+
+mean(PC2.top20$HC) # 1.224812
+sd(PC2.top20$HC) # 0.2084802
+
+mean(PC2.top20$OC) # 0.4593609
+sd(PC2.top20$OC) # 0.110869
+
+mean(PC2.top20$NOSC)
+sd(PC2.top20$NOSC)
+
+mean(PC2.top20$S / PC2.top20$C) # 0.004174785
+sd(PC2.top20$S / PC2.top20$C) # 0.01562232
+
+mean(PC2.top20$S) # 0.06766917
+sd(PC2.top20$S) # 0.2514927
+
+# %S containing formulas
+(count(PC2.top20 %>% 
+  filter(S > 0)) / length(PC2.top20$C)) * 100
+
+table(PC2.top20$core) # 191 / 399
+table(PC2.top20$CRAM.like) # 121 / 399
+table(PC2.top20$IOS.like) # 94 / 399
+table(PC2.top20$lignin.like) # 104 / 399
+table(PC2.top20$tannin.like) # 259 / 399
+
+mean(PC2.top20$AImod) # 0.2714286
+sd(PC2.top20$AImod) # 0.1536939
+
+mean(PC2.top20$DBE) # 7.774436
+sd(PC2.top20$DBE) # 2.413165
+
+table(PC2.top20$compound_class)
+
+ggplot(PCA.corr.noSDL %>% 
+          filter(PC2_corr == "x > 0") %>% 
+          slice_max(PC2, prop = 0.2), 
+       aes(x = OC, y =  HC, color = PC2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.05, 0.05),breaks=seq(-0.05, 0.05, 0.02), values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5)) +
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("PC2 vk h20_noSDL_0323.pdf",width = 6, height = 4)
+
+# 20% most negative PC2 peaks
+count(PCA.corr.noSDL %>% 
+  filter(PC2_corr == "x < 0") %>% 
+  slice_min(PC2, prop = 0.2)) # 483
+
+PC2.bottom20 <- PCA.corr.noSDL %>% 
+  filter(PC2_corr == "x < 0") %>% 
+  slice_min(PC2, prop = 0.2)
+
+mean(PC2.bottom20$reference) # 575.9988
+sd(PC2.bottom20$reference) # 70.06263
+
+mean(PC2.bottom20$HC) # 1.253158
+sd(PC2.bottom20$HC) # 0.185182
+
+mean(PC2.bottom20$OC) # 0.3995708
+sd(PC2.bottom20$OC) # 0.08294099
+
+mean(PC2.bottom20$NOSC)
+sd(PC2.bottom20$NOSC)
+
+mean(PC2.bottom20$S / PC2.bottom20$C) # 0.0001748356
+sd(PC2.bottom20$S / PC2.bottom20$C) # 0.002726031
+
+# %S containing formulas
+(count(PC2.bottom20 %>% 
+  filter(S > 0)) / length(PC2.bottom20$C)) * 100
+
+table(PC2.bottom20$core) # 29 / 487
+table(PC2.bottom20$CRAM.like) # 337 / 487
+table(PC2.bottom20$IOS.like) # 87 / 487
+table(PC2.bottom20$lignin.like) # 193 / 487
+table(PC2.bottom20$tannin.like) # 284 / 487
+
+sum(PC2.bottom20$S > 0) # number of S containing formulas -- 2
+length(PC2.bottom20$S) # total formulas in bottom 20% for PC1 -- 487
+sum(PC2.top20$S > 0) # number of S containing formulas -- 27
+length(PC2.top20$S) # total formulas in top 20% for RDA3 -- 399
+prop.test(x = c(2,27), n = c(487,399))
+
+mean(PC2.bottom20$S) # 0.004106776
+sd(PC2.bottom20$S) # 0.06401817
+
+mean(PC2.bottom20$AImod) # 0.256961
+sd(PC2.bottom20$AImod) # 0.1178747
+
+mean(PC2.bottom20$DBE) # 11.88501
+sd(PC2.bottom20$DBE) # 2.480193
+
+wilcox.test(PC2.top20$reference,PC2.bottom20$reference)
+
+table(PC2.bottom20$compound_class)
+
+# condensed aromatics
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Condensed aromatic (black carbon)"), sum(PC2.top20$compound_class=="Condensed aromatic (black carbon)")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class)))
+# polyphenols
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Aromatic (polyphenol)"), sum(PC2.top20$compound_class=="Aromatic (polyphenol)")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class)))
+# highly unsaturated aliphatics
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Highly unsaturated"), sum(PC2.top20$compound_class=="Highly unsaturated")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class)))
+# unsaturated aliphatics
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Unsaturated aliphatic"), sum(PC2.top20$compound_class=="Unsaturated aliphatic")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class)))
+# fatty acids
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Saturated fatty acid"), sum(PC2.top20$compound_class=="Saturated fatty acid")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class))) # no fatty acids
+# sugars
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Sugar"), sum(PC2.top20$compound_class=="Sugar")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class))) # no sugars
+# peptides
+prop.test(x = c(sum(PC2.bottom20$compound_class=="Peptide"), sum(PC2.top20$compound_class=="Peptide")), n = c(length(PC2.bottom20$compound_class),length(PC2.top20$compound_class))) # no peptides
+
+ggplot(PCA.corr.noSDL %>% 
+  filter(PC2_corr == "x < 0") %>% 
+  slice_min(PC2, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = PC2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits = c(-0.05, 0.05),breaks=seq(-0.05, 0.05, 0.02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+ 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) +
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+
+ggsave("PC2 vk l20_noSDL_0323.pdf",width = 6, height = 4)
+```
+
+#### exploring PC2 and Island of Stability (Lechtenfeld et al 2014)& CRAM
+
+```{r}
+PC2 <- rbind(PC2.bottom20, PC2.top20)
+PC2 <- PC2[,c(1:18,20,25)]
+PC2.top20 <- PC2.top20 %>% 
+  mutate(DBE.5O = DBE - (0.5*O),
+         O0.5C = (0.5*O)/C)
+
+PC2_rank_sums <- data.frame(subset(rank_sums, subset = (rownames(rank_sums) %in% rownames(PC2))))
+
+mbind<-function(...){
+ Reduce( function(x,y){cbind(x,y[match(row.names(x),row.names(y)),])}, list(...) )
+}
+
+PC2 <- mbind(PC2, PC2_rank_sums)
+
+CRAM <- read.csv("CRAM_Hertkorn et al 2006.csv") # taken from the appendix at the end of Hertkorn et al 2006
+sum(CRAM$Formula %in% rownames(PC2.bottom20)) # 253 matches - 17 with top 20% and 236 with bottom 20%
+table(PC2.bottom20$comp) # Hertkorn CRAM formulas are all CHO, so 236/441 CHO formulas match
+
+mean(PC2.bottom20$DBE/PC2.bottom20$C)
+mean(PC2.bottom20$DBE/PC2.bottom20$H)
+mean(PC2.bottom20$DBE/PC2.bottom20$O)
+
+sum(CRAM$Formula %in% rownames(PC2.top20))
+
+mean(PC2.top20$DBE/PC2.top20$C)
+mean(PC2.top20$DBE/PC2.top20$H)
+mean(PC2.top20$DBE/PC2.top20$O)
+
+aggregate(O0.5C ~ PC2_corr, PC2, mean)
+aggregate(DBE.5O ~ PC2_corr, PC2, mean)
+
+PC2.CHO <- subset(PC2, comp == "CHO")
+
+quantile(PC2.CHO$O0.5C, probs = 0.5) # 0.2037037
+quantile(PC2.CHO$DBE.5O, probs = 0.5) # 5.5
+
+subset(PC2.CHO, O0.5C > 0.2037037 & DBE.5O > 5.5)
+
+IOS <- read.csv("island of stability_Lechtenfeld et al 2014.csv") # taken from the supplementary of Lechtenfeld et al 2014
+
+sum(IOS$Formula %in% rownames(PC2.bottom20)) # 13 matches
+sum(IOS$Formula %in% rownames(PC2.top20)) # 38 matches
+
+sum(top20_formulas$peak %in% rownames(PC2.bottom20))
+sum(top20_formulas$peak %in% rownames(PC2.top20))
+
+PCA.corr.noSDL <- PCA.corr.noSDL %>% 
+  mutate(CRAM.like = ifelse(DBE/C < 0.68 & DBE/C > 0.30 & DBE/H < 0.95 & DBE/H > 0.20 & DBE/O < 1.75 & DBE/O > 0.77 & comp == "CHO", "yes", "no"))
+
+sum(PC2.bottom20$CRAM.like == "yes") # 337/487
+sum(PC2.top20$CRAM.like == "yes") # 121/399
+
+CRAM.like.form <- subset(PCA.corr.noSDL, CRAM.like == "yes", select = "Formula")
+
+CRAM.intensities <- subset(FTIC.raw, subset = (rownames(FTIC.raw) %in% rownames(CRAM.like.form)))
+
+percCRAM.samples <- data.frame(perc.CRAMlike = (colSums(CRAM.intensities > 0)/4431)*100)
+percCRAM.samples.RDA <- subset(percCRAM.samples, rownames(percCRAM.samples) %in% rownames(RDA.scores.noSDL))
+
+PCA.scores.noSDL$perc.CRAMlike <- percCRAM.samples.RDA$perc.CRAMlike
+
+PCA.scores.noSDL <- PCA.scores.noSDL %>% 
+    mutate(PC2.corr = case_when(PC2 < 0 ~ "x < 0",
+                                PC2 > 0 ~ "x > 0",
+                                PC2 == 0 ~ "x = 0"))
+
+aggregate(ideg ~ PC2.corr, PCA.scores.noSDL, mean)
+
+# PC2 vs IoS
+ggplot(PCA.scores.noSDL, 
+       aes(x = avg.mass, y = PC2, color = Season)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(x = "Island of Stability (%)", y = "PC2 (8.0%)", color = "Avg. O/C") + 
+  #scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  scale_y_continuous(limits=c(-0.3,0.1)) +
+  #scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25)) + #limits = c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")+
+  facet_wrap(~PC2.corr)
+```
+
+## Goodness of fit VKs - not included in paper
+
+```{r}
+PCA.noSDL.goodness <- data.frame(goodness(RDA.noSDL.0323, model = "CA", display = "species"))
+PCA.noSDL.goodness <- cbind(mol.data,PCA.noSDL.goodness[1:5])
+
+PCA.corr.noSDL <- PCA.corr.noSDL %>% 
+  mutate(PC1_goodness = PCA.noSDL.goodness$PC1) %>% 
+  mutate(PC2_goodness = PCA.noSDL.goodness$PC2)
+
+# 20% CA1 goodness peaks
+count(PCA.corr.noSDL %>% 
+  slice_max(PC1_goodness, prop = 0.2)) #%>% 
+ # slice_min(CA2, prop = 0.2))
+
+RDA.noSDL.goodness <- data.frame(goodness(RDA.noSDL.0323, model = "CCA", display = "species"))
+RDA.noSDL.goodness <- cbind(mol.data,RDA.noSDL.goodness)
+
+RDA.corr.noSDL <- RDA.corr.noSDL %>% 
+  mutate(RDA1_goodness = RDA.noSDL.goodness$RDA1) %>% 
+  mutate(RDA2_goodness = RDA.noSDL.goodness$RDA2)
+
+# 20% CCA2 goodness peaks
+count(CCA.corr.0123 %>% 
+  slice_max(CCA2_goodness, prop = 0.2))
+```
+
+### PC1 goodness VK
+
+```{r}
+ggplot(PCA.corr.noSDL %>% 
+         slice_max(PC1_goodness, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = PC1)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits=c(-0.04,0.04), breaks = seq(-0.04,0.04, .02),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+
+  #dark_theme_gray() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+ # theme(panel.grid.major = element_line(color = "#EBEBEB"), panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) + 
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.15, y = 1.62, label = "aliphatic", size = 3)+
+  #annotate("text", x = 1.058, y = 1.4, label = "highly unsaturated", size = 3)+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.1, y = 0.62, label = "polyphenols", size = 3, angle = 352)+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+  #annotate("text", x = 1.01, y = 0.3, label = "condensed aromatics", size = 3, angle = 352)
+```
+
+### PC2 goodness VK
+
+```{r}
+ggplot(PCA.corr.noSDL %>% 
+         slice_max(PC2_goodness, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = PC2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300),limits=c(-0.05,0.05), breaks = seq(-0.05,0.05,0.025),values = c(0,0.5,1),na.value = NA,guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+
+  #dark_theme_gray() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+ # theme(panel.grid.major = element_line(color = "#EBEBEB"), panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) + 
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.15, y = 1.62, label = "aliphatic", size = 3)+
+  #annotate("text", x = 1.058, y = 1.4, label = "highly unsaturated", size = 3)+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.1, y = 0.62, label = "polyphenols", size = 3, angle = 352)+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+  #annotate("text", x = 1.01, y = 0.3, label = "condensed aromatics", size = 3, angle = 352)
+
+#ggsave("CA1 goodness vk h20_0123_CA1 score.pdf",width = 6, height = 4)
+```
+
+## RDA2 goodness VK
+
+```{r}
+ggplot(RDA.corr.noSDL %>% 
+         slice_max(RDA2_goodness, prop = 0.2), 
+       aes(x = O.C, y =  H.C, color = RDA2)) + 
+  geom_point(shape = 20, size = 3.5, alpha = 0.8) + 
+  scale_color_gradientn(colors = cmocean('balance')(300), limits=c(-0.05,0.05), breaks = seq(-0.05,0.05,0.025), values = c(0,0.5,1), na.value = NA, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.8))+
+  labs(x = "O/C", y  = "H/C", color = "") + 
+  theme_linedraw()+
+  #dark_theme_gray() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+ # theme(panel.grid.major = element_line(color = "#EBEBEB"), panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(0.0, 1.2, .3), limits=c(0, 1.2)) + 
+  scale_y_continuous(breaks=seq(0.0, 2.5, .5), limits=c(0, 2.5))+
+  geom_abline(intercept = 1.5, slope = 0, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.15, y = 1.62, label = "aliphatic", size = 3)+
+  #annotate("text", x = 1.058, y = 1.4, label = "highly unsaturated", size = 3)+
+  geom_abline(intercept = 1.1, slope = -0.35, size = 0.3, linetype = "twodash")+
+  #annotate("text", x = 1.1, y = 0.62, label = "polyphenols", size = 3, angle = 352)+
+  geom_abline(intercept = 0.75, slope = -0.35, size = 0.3, linetype = "twodash")
+  #annotate("text", x = 1.01, y = 0.3, label = "condensed aromatics", size = 3, angle = 352)
+
+ggplot(RDA.scores.noSDL) +
+  geom_point(aes(x = Datetime, y = RDA2, color = avg.HC))
+
+#aggregate(RDA, RDA.scores.noSDL, mean)
+
+#ggsave("CCA2 goodness vk h20_0123_CCA2 score.pdf",width = 6, height = 4)
+```
+
+```{r}
+# CCA2.top20.goodness <- CCA.corr.0123 %>% 
+#   slice_max(CCA2_goodness, prop = 0.2)
+# 
+# CA1.top20.goodness <- CA.corr.0123 %>% 
+#   slice_max(CA1_goodness, prop = 0.2)
+
+RDA3 <- rbind(RDA3.top20,RDA3.bottom20)
+PC1 <- rbind(PC1.top20,PC1.bottom20)
+
+sum(rownames(PC1.top20) %in% rownames(RDA3.bottom20)) # 185 shared formulas
+sum(rownames(RDA3.top20) %in% rownames(PC1.bottom20)) # 208 shared formulas
+
+wilcox.test(RDA3.top20$reference, PC1.bottom20$reference) # sig diff
+wilcox.test(RDA3.top20$OC, PC1.bottom20$OC) # sig diff
+wilcox.test(RDA3.top20$S, PC1.bottom20$S) # not sig diff
+
+sum(PC1.bottom20$S > 0) # number of S containing formulas -- 18
+length(PC1.bottom20$S) # total formulas in bottom 20% for PC1 -- 454
+sum(RDA3.top20$S > 0) # number of S containing formulas -- 29
+length(RDA3.top20$S) # total formulas in top 20% for RDA3 -- 398
+prop.test(x = c(18,29), n = c(454,398)) # p-value = 0.04902 but alpha is 0.01 so not significantly different
+
+# -------------
+
+wilcox.test(RDA3.bottom20$reference, PC1.top20$reference) # not sig diff
+wilcox.test(RDA3.bottom20$OC, PC1.top20$OC) # sig diff
+wilcox.test(RDA3.bottom20$HC, PC1.top20$HC) # sig diff
+
+sum(PC1.top20$S > 0) # number of S containing formulas -- 193
+length(PC1.top20$S) # total formulas in top 20% for PC1 -- 432
+sum(RDA3.bottom20$S > 0) # number of S containing formulas -- 90
+length(RDA3.bottom20$S) # total formulas in bottom 20% for RDA3 -- 487
+prop.test(x = c(90,193), n = c(487,432)) # sig diff
+```
+
+```{r}
+CCA.0123.goodness.sam <- data.frame(goodness(CCA.0123, model = "CCA", display = "sites"))
+CCA.0123.goodness.sam <- cbind(CA.scores.0123[,1:20], CCA.0123.goodness.sam)
+
+CA.0123.goodness.sam <- data.frame(goodness(CCA.0123, model = "CA", display = "sites"))
+CA.0123.goodness.sam <- cbind(CA.scores.0123[,1:20],CA.0123.goodness.sam[,1:4])
+```
+
+# Porewater to open ocean transect FTICRMS data (from Gomez-Saez et al., 2017)
+
+## Calculating porewater SDLs using lowest GC DR and then removing all peaks below porewater SDLs
+
+### Data formatting
+
+```{r}
+normalized_porewater <- read.csv("/Users/mackenziefiss/Library/Mobile Documents/com~apple~CloudDocs/R/Groves Creek/GC_data/Gomez-Saez porewater/Gonzalo_normalized_porewater_2017.csv", header = T) # normalized formula intensities emailed by Gonzalo, with formulas with MW > 750 Da removed (3080, 25485 remaining)
+
+paper_porewater <- read.csv("/Users/mackenziefiss/Library/Mobile Documents/com~apple~CloudDocs/R/Groves Creek/GC_data/Gomez-Saez porewater/es7b03713_si_001.csv", header = T) # the formula intensity data that is in the SI of the ES&T paper -- just changed column names to make friendlier for R and calculated the Mass_Da column, equation in es7b03713_si_001.xlsx
+
+porewater_n <- data.frame(table(paper_porewater$Formula))
+porewater_dups <- subset(porewater_n, Freq > 1)
+porewater_dups <- data.frame(porewater_dups[,1])
+colnames(porewater_dups) <- "Formula"
+
+paper_porewater <- anti_join(paper_porewater, porewater_dups, by = "Formula") # removing duplicate formulas (n = 20, 28521 remaining)
+rownames(paper_porewater) <- paper_porewater$Formula
+
+porewater_formulas <- paper_porewater[,1:3]
+GC_formulas <- data.frame(Formula = FTIC.data.noSDL$Formula, Mass_Da = FTIC.data.noSDL$reference)
+
+GC.porewater.merge <- left_join(GC_formulas, paper_porewater, by = "Formula")
+rownames(GC.porewater.merge) <- GC.porewater.merge$Formula
+
+mass.comparison <- data.frame(GC_mass_Da = GC.porewater.merge$Mass_Da.x, 
+                              PW_mass_mz = GC.porewater.merge$Mass_mz, 
+                              PW_mass_Da = GC.porewater.merge$Mass_Da.y,
+                              Mass.diff = GC.porewater.merge$Mass_Da.y - GC.porewater.merge$Mass_Da.x) # columns from dataframe x are GC columns, dataframe y is paper_porewater
+mean(mass.comparison$Mass.diff, na.rm = T) # mean difference in mass of matching GC and Gomez-Saez porewater formulas is 0.2734889 Da
+sd(mass.comparison$Mass.diff, na.rm = T) # SD is 0.08465289 Da
+
+GC.porewater.merge <- GC.porewater.merge[,15:65]
+GC.porewater.merge[is.na(GC.porewater.merge)] <- 0 # turn NAs into 0s
+
+GC.porewater.merge.t <- data.frame(t(GC.porewater.merge))
+
+# get sample IDs of triplicate samples (_a, _b, _c) and the main ID 
+porewater.ID <- data.frame(Trip = rownames(GC.porewater.merge.t), 
+                           Main = str_sub(rownames(GC.porewater.merge.t),1,-3))
+
+## to average triplicate samples (as rows)
+
+n <- 3
+porewater.avg <- aggregate(GC.porewater.merge.t, list(rep(1:(nrow(GC.porewater.merge.t) %/% n + 1), each = n, len = nrow(GC.porewater.merge.t))), mean)[-1]
+rownames(porewater.avg) <- unique(porewater.ID$Main) # pulls out one occurrence of each sample ID (51 -> 17)
+
+porewater.avg.t <- data.frame(t(porewater.avg))
+
+before_norm_porewater <- porewater.avg # formulas as columns
+
+before_norm_porewater_t <- porewater.avg.t # samples as columns
+before_norm_porewater_t[before_norm_porewater_t==0] <-  NA # changes all 0s to NA values
+
+before_norm_pore_zeroes <- before_norm_porewater_t # we do also need a copy of the dataframe with 0s though
+before_norm_pore_zeroes[is.na(before_norm_pore_zeroes)] <- 0 
+```
+
+### Porewater SDL calculations
+
+```{r}
+mean_abundance_all <- data.frame(colMeans(before_norm_porewater_t, na.rm = T))
+porewater_SDL_all_10 <- mean_abundance_all / GC_lowest_DR_all_10 # mean of all peak intensities in each porewater sample divided by the lowest DR from the Groves Creek dataset, 4.90673 -- calculated in GC SDL section above
+```
+
+### Identifying peaks below porewater SDLs
+
+```{r}
+porewater_below_SDL_all_10 <- data.frame(matrix(nrow = nrow(before_norm_porewater_t), ncol = ncol(before_norm_porewater_t)))
+
+porewater_SDL_all_10_t <- data.frame(t(porewater_SDL_all_10))
+
+for (i in 1:ncol(before_norm_porewater_t))
+{
+  for (j in 1:nrow(before_norm_porewater_t))
+  {
+    porewater_below_SDL_all_10[j,i] = before_norm_porewater_t[j,i] < porewater_SDL_all_10_t[1,i]
+  }
+};system(notify)
+
+# if your logicals are all TRUE/FALSE, convert to 0s (F) and 1s (T)
+porewater_below_SDL_all_10 <- data.frame(ifelse(porewater_below_SDL_all_10 == FALSE, 0, 1))
+
+porewater_below_SDL_all_10_zeroes <- porewater_below_SDL_all_10
+porewater_below_SDL_all_10_zeroes[is.na(porewater_below_SDL_all_10)] <- 0 # this and the line below give you the same output for the colSums with if you add the na.rm = T arg or convert NAs to 0s 
+```
+
+### Removing peaks below porewater SDLs
+
+```{r}
+porewater_below_SDL_all_10_ones <- porewater_below_SDL_all_10 # copy logical dataframe of 0 (not < SDL), 1 (< SDL), or NA, created in an earlier step
+porewater_below_SDL_all_10_ones[is.na(porewater_below_SDL_all_10_ones)] <- 1 # turn all NA values to 1 (< SDL)
+
+porewater_no_SDL <- porewater_below_SDL_all_10_ones
+
+for (i in 1:ncol(porewater_below_SDL_all_10_ones)) # replace all 0 values (not < SDL) with raw value
+{
+  for (j in 1:nrow(porewater_below_SDL_all_10_ones))
+  {
+   if (porewater_below_SDL_all_10_ones[j,i] == 0)
+    porewater_no_SDL[j,i] = before_norm_porewater_t[j,i]
+  }
+};system(notify)
+
+porewater_no_SDL[porewater_no_SDL==1] <-  NA # replace all 1 values with NA
+
+colnames(porewater_no_SDL) <- colnames(before_norm_porewater_t)
+rownames(porewater_no_SDL) <- GC_formulas$Formula
+```
+
+## Calculating weighted average O/C for porewater samples
+
+```{r}
+porewater_no_SDL[is.na(porewater_no_SDL)] <- 0 # replaces NAs with 0s
+
+porewater.peaks.sum <- data.frame(t(colSums(porewater_no_SDL)))
+
+OC <- data.frame(FTIC.data.noSDL$OC)
+rownames(OC) <- rownames(FTIC.data.noSDL)
+colnames(OC) <- "OC"
+
+weighted_OC_pore <- data.frame(matrix(ncol = ncol(porewater_no_SDL), nrow = nrow(porewater_no_SDL)))
+for (i in 1:ncol(porewater_no_SDL))
+{
+  for(j in 1:nrow(porewater_no_SDL))
+  {
+    weighted_OC_pore[j, i] = (porewater_no_SDL[j, i] * OC[j, 1]) / porewater.peaks.sum[1, i]
+  }
+}
+
+w_OC_pore <- data.frame(colSums(weighted_OC_pore))
+colnames(w_OC_pore) <- "avg.OC"
+rownames(w_OC_pore) <- colnames(porewater_no_SDL)
+
+wtd.mean(x = mass, weights = porewater_no_SDL$porewater_photo_t0) # from the Hmisc package -- weighted mean
+sqrt(wtd.var(x = mass, weights = porewater_no_SDL$porewater_photo_t0)) # weighted standard deviation
+```
+
+## Calculating intensity weighted average NOSC
+
+```{r}
+
+weighted_NOSC_pore <- data.frame(matrix(ncol = ncol(porewater_no_SDL), nrow = nrow(porewater_no_SDL)))
+for (i in 1:ncol(porewater_no_SDL))
+{
+  for(j in 1:nrow(porewater_no_SDL))
+  {
+    weighted_NOSC_pore[j, i] = (porewater_no_SDL[j, i] * NOSC[j, 1]) / porewater.peaks.sum[1, i]
+  }
+}
+
+w_NOSC_pore <- data.frame(colSums(weighted_NOSC_pore))
+colnames(w_NOSC_pore) <- "avg.NOSC"
+rownames(w_NOSC_pore) <- colnames(porewater_no_SDL)
+```
+
+## Calculating %S containing formulas for porewater samples
+
+```{r}
+S <- data.frame(FTIC.data.noSDL$S)
+rownames(S) <- rownames(FTIC.data.noSDL)
+colnames(S) <- "S"
+
+S.formulas <- subset(FTIC.data.noSDL, S > 0, select = "Formula")
+S.intensities.pore <- subset(porewater_no_SDL, subset = (rownames(porewater_no_SDL) %in% rownames(S.formulas)))
+
+percS.samples.pore <- data.frame(percS.formulas.pore = (colSums(S.intensities.pore > 0)/4431)*100)
+```
+
+## Normalizing and scaling porewater FTICRMS (peaks below SDL removed)
+
+```{r}
+porewater_noSDL_t <- data.frame(t(porewater_no_SDL))
+porewater_noSDL_t[is.na(porewater_noSDL_t)] <- 0 # replaces NAs with 0s, if not done already
+porewater_sample_sum <- rowSums(porewater_noSDL_t) # sum of all peak intensities in each sample (as rows)
+norm.porewater.FTIC <- (porewater_noSDL_t / porewater_sample_sum) * 1000 # sum-normalizes and is input for scaling across samples, formulas as columns
+
+norm.porewater.FTIC.sub <- norm.porewater.FTIC[c(4,10:11, 13:14,16),] # removes samples from experiments (ex. photochemistry)
+
+porewater.process.sub <- preProcess(as.data.frame(norm.porewater.FTIC.sub), method=c("range")) # enables us to scale the value to a range of 0 to 1 using method = c('range') as an argument
+norm.scale.porewater.sub <- predict(porewater.process.sub, as.data.frame(norm.porewater.FTIC.sub)) # predict() method applies the actions of the preProcess() function on the entire data frame
+scaled.norm.porewater.noSDL.sub <- norm.scale.porewater.sub
+
+rownames(scaled.norm.porewater.noSDL.sub) <- rownames(norm.porewater.FTIC.sub)
+colnames(scaled.norm.porewater.noSDL.sub) <- colnames(norm.porewater.FTIC)
+```
+
+## Calculating Isup index for Gomez-Saez samples
+
+```{r}
+norm.porewater.t <- data.frame(t(norm.porewater.FTIC))
+porewater.m.neg <- (norm.porewater.t)[rownames(norm.porewater.t)%in%t.pos,] # take t.pos (d13C has a negative sign and meant are the Island of stability peaks) 
+porewater.m.neg.sums <- colSums(porewater.m.neg)
+porewater.m.pos <- (norm.porewater.t)[rownames(norm.porewater.t)%in%m.pos,]
+porewater.m.pos.sums <- colSums(porewater.m.pos)
+porewater.Imap <- data.frame(Imap = porewater.m.pos.sums/(porewater.m.pos.sums + porewater.m.neg.sums))
+```
+
+## Calculating %MLB
+
+```{r}
+high.HC.pore.samples <- subset(norm.porewater.t, subset = (rownames(norm.porewater.t) %in% rownames(high.HC)))
+
+overall.MLB.pore <- data.frame(overall.MLB = (colSums(high.HC.pore.samples > 0)/4431)*100)
+```
+
+## Predict porewater RDA and PCA
+
+```{r}
+RDA.pore.scores.noSDL.sub <- data.frame(predict(RDA.noSDL.0323, model = "CCA", type = "wa", newdata = scaled.norm.porewater.noSDL.sub))
+
+avg.pore.sub <- cbind(w_OC_pore, percS.samples.pore, porewater.Imap, w_NOSC_pore, overall.MLB.pore)
+avg.pore.sub <- subset(avg.pore.sub, rownames(avg.pore.sub) %in% rownames(scaled.norm.porewater.noSDL.sub))
+colnames(avg.pore.sub)[2] <- "percS.formulas"
+
+RDA.pore.scores.noSDL.sub <- cbind(RDA.pore.scores.noSDL.sub, avg.pore.sub)
+GC.pore.scores.RDA.sub <- rbind(RDA.scores.noSDL[,c(38:42, 22, 24)], RDA.pore.scores.noSDL.sub)
+GC.pore.scores.RDA.sub$Dataset <- rep(c("Fiss Groves Creek", "Gomez-Saez Skidaway"), c(322,6))
+
+PCA.pore.scores.noSDL.sub <- data.frame(predict(RDA.noSDL.0323, model = "CA", type = "wa", newdata = scaled.norm.porewater.noSDL.sub))
+PCA.pore.scores.noSDL.sub <- cbind(PCA.pore.scores.noSDL.sub[,c(1:5)], avg.pore.sub)
+GC.pore.scores.PCA <- rbind(PCA.scores.noSDL[,c(38:42, 22, 24, 31, 27, 47)], PCA.pore.scores.noSDL.sub)
+GC.pore.scores.PCA$Dataset <- rep(c("Fiss Groves Creek", "Gomez-Saez Skidaway"), c(322,6))
+
+# data.frame(predict(RDA.noSDL.0323, model = "CA", type = "sp", newdata = scaled.norm.porewater.noSDL))
+```
+
+## Project porewater RDA and PCA onto GC RDA and PCA
+
+```{r}
+scaleFUN1 <- function(x) sprintf("%.1f", x)
+scaleFUN2 <- function(x) sprintf("%.2f", x)
+
+# RDA biplot
+ggplot(GC.pore.scores.RDA.sub, aes(x = RDA1, y = RDA2, color = percS.formulas, shape = Dataset, text = row.names(GC.pore.scores.RDA.sub))) +
+  geom_point(alpha = 0.8, size = 3) + 
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25)) + 
+  theme_linedraw() + 
+  theme(panel.grid.major = element_line(color = "#EBEBEB"), panel.grid.minor = element_blank())+
+  scale_x_continuous(breaks=seq(-0.15, 0.15, 0.05), 
+                     limits=c(-0.15, 0.15), 
+                     labels = scaleFUN2) +
+  #scale_y_continuous(breaks=seq(-0.3, 0.2, 0.1), 
+                     #limits=c(-0.3, 0.22), 
+                     #labels = scaleFUN1) +
+  labs(x = "RDA1 (11.4%)", y = "RDA2", color = "Avg. O/C")
+
+ggsave("GC_pore_RDA_biplot.pdf", width = 8, height = 4)
+
+# PC1 vs OC
+
+# no colorbar
+p.nocolorbar <- ggplot(GC.pore.scores.PCA, aes(x = avg.OC, y = PC1, color = avg.OC, shape = Dataset, text = row.names(GC.pore.scores.PCA))) +
+  geom_point(alpha = 0.8, size = 2.5) + 
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(0.32, 0.5), 
+                     breaks=seq(0.32, 0.5, 0.06)) + 
+  scale_shape_manual(values = c(19,17))+
+  theme_linedraw()+
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(limits = c(0.32, 0.5), 
+                     breaks=seq(0.32, 0.5, 0.06)) + 
+  scale_y_continuous(breaks=seq(-0.2, 0.2, 0.1), 
+                     limits=c(-0.2, 0.2)) +
+  labs(x = "Intensity-weighted average O/C", y = "PC1 (25.9%)", color = "Avg. O/C", shape = "")+
+  guides(color = "none", shape = guide_legend(direction="horizontal"))
+
+p.shape <- cowplot::get_legend(p.nocolorbar)
+p.shape <- ggplotify::as.ggplot(p.shape)
+
+p.nolegend <- ggplot(GC.pore.scores.PCA, aes(x = avg.OC, y = PC1, color = avg.OC, shape = Dataset, text = row.names(GC.pore.scores.PCA))) +
+  geom_point(alpha = 0.8, size = 2.5) + 
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(0.32, 0.5), 
+                     breaks=seq(0.32, 0.5, 0.06)) + 
+  theme_linedraw()+
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  scale_x_continuous(limits = c(0.32, 0.5), 
+                     breaks=seq(0.32, 0.5, 0.06)) + 
+  scale_y_continuous(breaks=seq(-0.2, 0.2, 0.1), 
+                     limits=c(-0.2, 0.2)) +
+  labs(x = "Intensity-weighted average O/C", 
+       y = "PC1 (25.9%)", 
+       color = "Avg. O/C")+
+       #color = bquote("%"*MLB[L]),
+       #caption = bquote("%"*MLB[L]*"= molecular lability bounday from D'Andrilli et al 2023"))+
+  guides(shape = "none") +
+  #annotate("text", x = 0.34, y = 0.18, label = "Reduced \nporewater?", size = 3.25) +
+  annotate("text", x = 0.328, y = 0.116, label = "Reduced \nporewater?", size = 3.25) +
+  annotate("text", x = 0.415, y = -0.18, label = "Oxidized \n water column?", size = 3.25) +
+  annotate("text", x = 0.426, y = 0.052, label = "Porewater", size = 3.25) +
+  #annotate("text", x = 0.49, y = -0.17, label = "Ocean", size = 3.25)
+  annotate("text", x = 0.475, y = -0.1425, label = "Ocean", size = 3.25)
+
+p.nolegend /
+  p.shape + 
+  plot_layout(heights = c(3, 0.25))
+  
+ggsave("GC_pore_PC1_OC.pdf", width = 6, height = 4)
+```
+
