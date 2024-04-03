@@ -1,0 +1,423 @@
+---
+title: "DOM indices"
+author: "Mackenzie Fiss"
+date: "1/27/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(cmocean)
+library(ggplot2)
+library(GGally)
+```
+
+*Formatting*
+
+```{r}
+all.chem <- FTIC.data.noSDL
+mz <- read.csv("mass.csv", header = T)
+all.chem <- join(all.chem, mz, by = "Formula")
+rownames(all.chem) <- all.chem$Formula
+
+sample.names <- data.frame(Sample.ID = rownames(norm.FTIC))
+
+all.dom <- data.frame(t(norm.FTIC))
+```
+
+# Ideg - Flerus et al 2012
+
+```{r}
+d.neg <- c("C21H26O11", "C17H20O9", "C19H22O10", "C20H22O10", "C20H24O11")
+d.pos <- c("C13H18O7", "C14H20O7", "C15H22O7", "C15H22O8", "C16H24O8")
+ftdom.d.neg <- (all.dom)[rownames(all.dom)%in%d.neg,]
+d.neg.sums <- colSums(ftdom.d.neg)
+ftdom.d.pos <-  (all.dom)[rownames(all.dom)%in%d.pos,]
+d.pos.sums <- colSums(ftdom.d.pos)
+ideg <- as.data.frame(d.neg.sums/(d.neg.sums+d.pos.sums))
+ideg <- cbind(ideg, rownames(ideg))
+colnames(ideg) <- c("ideg", "names")
+
+ideg$Date <- PCA.scores.noSDL$Date
+```
+
+## Ideg over time
+
+```{r}
+# Ideg over time
+ggplot(ideg) + 
+  geom_point(aes(x = Date, y = ideg, color = ideg), shape = 20, alpha = 0.7, size = 4) + 
+  labs(x = "Month (2013 - 2015)", y = bquote(I[deg]*" (Flerus et al 2012)"), color = bquote(I[deg])) + 
+  scale_y_continuous(limits = c(0.3, 0.55))+
+  scale_color_cmocean(name = "ice", direction = -1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(0.3, 0.6), breaks = seq(0.3, 0.6, 0.1)) + 
+  #scale_x_date(date_labels = "%b", date_breaks = "8 weeks", limits = as.Date(c("2013-08-05","2015-02-26"))) + 
+  theme_linedraw() +  
+  theme(panel.grid.major = element_line(color = "#EBEBEB"), panel.grid.minor = element_blank())
+```
+
+## Ideg of Gonzalo's porewater
+
+```{r}
+porewater.dom <- data.frame(t(norm.porewater.FTIC))
+
+ftdom.d.neg.pore <- (porewater.dom)[rownames(porewater.dom)%in%d.neg,]
+d.neg.sums.pore <- colSums(ftdom.d.neg.pore)
+ftdom.d.pos.pore <-  (porewater.dom)[rownames(porewater.dom)%in%d.pos,]
+(d.pos.sums.pore <- colSums(ftdom.d.pos.pore))
+ideg.pore <- as.data.frame(d.neg.sums.pore/(d.neg.sums.pore+d.pos.sums.pore))
+
+#ideg.pore <- cbind(ideg, rownames(ideg))
+#colnames(ideg) <- c("ideg", "names")
+```
+
+
+# %IOS - Island of stability - Lechtenfeld et al 2014
+
+```{r}
+ios.chem2 <- subset(all.chem, all.chem$N==0 & all.chem$S==0 & all.chem$P==0)
+ios.cho.dom <- as.data.frame((all.dom)[rownames(all.dom)%in%rownames(ios.chem2),])
+ios.chem <- subset(all.chem, all.chem$HC>1.04 & all.chem$HC<1.3)
+ios.chem <- subset(ios.chem, ios.chem$OC>0.42 & ios.chem$OC<0.62)
+ios.chem <- subset(ios.chem, ios.chem$mz>332 & ios.chem$mz<388 | ios.chem$mz>446 & ios.chem$mz<548)
+ios.dom <- as.data.frame((all.dom)[rownames(all.dom)%in%rownames(ios.chem),])
+ios.percent <- as.data.frame(colSums(ios.dom)/colSums(ios.cho.dom)*100)
+colnames(ios.percent) <- "IoS.percent"
+```
+
+# Iterr - Medeiros et al 2016
+
+```{r}
+t.neg <- c("C13H12O5","C15H14O4","C14H12O5","C14H14O5","C13H12O6","C16H15O4", "C15H14O5","C14H12O6", "C15H16O5","C14H14O6","C16H14O5","C16H16O5","C15H14O6","C15H16O6","C14H14O7","C17H16O5","C16H14O6", "C17H18O5", "C16H16O6","C15H14O7","C17H16O6","C16H14O7","C18H18O6","C17H16O7","C17H18O7", "C18H16O7", "C18H18O7","C17H16O8","C19H18O7","C20H20O7","C19H18O8","C20H18O9","C19H16O10","C21H20O9","C20H18O10","C22H22O9","C21H20O10","C23H22O10","C24H24O10","C25H26O10")
+t.pos <- c("C15H19NO6", "C15H21NO6", "C17H21NO7", "C17H23NO7", "C17H22O8", "C16H21NO8", "C17H20N2O7", "C17H19NO8", "C18H23NO7", "C17H21NO8", "C18H24O8", "C16H19NO9", "C17H23NO8","C17H22O9", "C17H24O9", "C18H21NO8","C17H19NO9", "C18H23NO8", "C18H22O9", "C17H21NO9","C18H24O9", "C18H20N2O8", "C18H21NO9", "C19H24O9", "C18H23NO9", "C18H22O10", "C18H24O10", "C20H24O9", "C19H22O10", "C20H26O9", "C19H24O10", "C19H26O10","C20H24O10","C20H26O10", "C19H24O11", "C20H24O11", "C20H26O11", "C20H26O12", "C22H28O11", "C21H28O12")
+ftdom.t.neg <- (all.dom)[rownames(all.dom)%in%t.neg,]
+t.neg.sums <- colSums(ftdom.t.neg)
+ftdom.t.pos <- (all.dom)[rownames(all.dom)%in%t.pos,]
+t.pos.sums <- colSums(ftdom.t.pos)
+Iterr <- data.frame(Iterr = t.neg.sums/(t.neg.sums + t.pos.sums))
+```
+
+# Molecular lability boundary (MLB) from Andrilli et al 2023
+
+## Overall MLB
+
+```{r}
+# % MLB
+high.HC <- subset(FTIC.data.noSDL, HC >= 1.5, select = c("Formula", "comp2"))
+
+high.HC.samples <- subset(norm_intensity_matrix, subset = (rownames(norm_intensity_matrix) %in% rownames(high.HC)))
+
+overall.MLB <- data.frame(perc.MLB = (colSums(high.HC.samples > 0)/4431)*100)
+```
+
+### Overall MLB relationships
+
+```{r}
+overall.MLB <- cbind(PCA.scores.noSDL[c(1:31,38,39)], RDA.scores.noSDL[38:40], overall.MLB)
+
+# MLB and degradation index over time
+ggplot(overall.MLB) + 
+  geom_point(aes(x = Datetime, y = ideg, color = perc.MLB), shape = 20, alpha = 0.7, size = 4) + 
+  labs(x = "Month (2013 - 2015)", 
+       y = bquote(I[DEG]), 
+       color = bquote("%"*MLB[L]),
+       caption = bquote("%"*MLB[L]*"= molecular lability bounday from D'Andrilli et al 2023, "*I[DEG]*"= degradation index from Flerus et al 2012")) + 
+  scale_y_continuous(limits = c(0.3, 0.55))+
+  scale_color_cmocean(name = "ice", direction = -1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(7, 12), breaks = seq(7, 12, 1)) + 
+  #scale_x_date(date_labels = "%b", date_breaks = "8 weeks", limits = as.Date(c("2013-08-05","2015-02-26"))) + 
+  theme_linedraw() +  
+  theme(panel.grid.major = element_line(color = "#EBEBEB"), panel.grid.minor = element_blank())
+
+ggplot(overall.MLB,
+       aes(x = avg.OC, y = PC1, color = perc.MLB)) + 
+  geom_point(shape = 20, alpha = 0.7, size = 4) + 
+  labs(x = "Intensity-weighted average O/C", 
+       y = "PC1 (25.9%)", 
+       color = bquote("%"*MLB[L]), 
+       caption = bquote("%"*MLB[L]*"= molecular lability bounday from D'Andrilli et al 2023")) + 
+  scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  scale_y_continuous(limits=c(-0.2, 0.2)) +
+  scale_color_cmocean(name = "matter", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(7,12)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")
+
+ggsave("PC1_OC_MLB.pdf", width = 6, height = 4)
+
+ggpairs(MLB,
+        columns = c(37,34:36,32:33),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("MLB", "RDA1", "RDA2", "RDA3", "PC1", "PC2")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+```
+
+## Per heteroatom group MLB
+
+```{r}
+FTIC.data.noSDL$comp2 <- character(length(FTIC.data.noSDL$C))
+
+for (i in 1:length(FTIC.data.noSDL$C)) {
+          ifelse(FTIC.data.noSDL$C[i] > 0 & FTIC.data.noSDL$H[i] > 0 & FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHO",
+          ifelse(FTIC.data.noSDL$C[i] > 0 & FTIC.data.noSDL$H[i] > 0 & FTIC.data.noSDL$O[i] == 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CH", 
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 1 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHON1",
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 2 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHON2",
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 3 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHON3",
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 4 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHON4",
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 1, FTIC.data.noSDL$comp2[i] <- "CHOP1", 
+          ifelse(FTIC.data.noSDL$O[i] == 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 1, FTIC.data.noSDL$comp2[i] <- "CHP1", 
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 1 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHOS1", 
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 2 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHOS2",
+          ifelse(FTIC.data.noSDL$O[i] == 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 1 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHS1",
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 1 & FTIC.data.noSDL$S[i] == 0 & FTIC.data.noSDL$P[i] == 1, FTIC.data.noSDL$comp2[i] <- "CHON1P1", 
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 1 & FTIC.data.noSDL$S[i] == 1 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHON1S1",
+          ifelse(FTIC.data.noSDL$O[i] > 0 & FTIC.data.noSDL$N[i] == 0 & FTIC.data.noSDL$S[i] == 1 & FTIC.data.noSDL$P[i] == 1, FTIC.data.noSDL$comp2[i] <- "CHOP1S1",
+          ifelse(FTIC.data.noSDL$O[i] == 0 & FTIC.data.noSDL$N[i] == 1 & FTIC.data.noSDL$S[i] == 1 & FTIC.data.noSDL$P[i] == 0, FTIC.data.noSDL$comp2[i] <- "CHN1S1",
+          FTIC.data.noSDL$comp2[i] <- "oops")))))))))))))))
+}
+
+high.HC.samples.comp <- cbind(high.HC.samples, high.HC[2])
+
+table(FTIC.data.noSDL$comp2)
+table(high.HC.samples.comp$comp2)
+
+# CHO
+CHO.samples <- subset(high.HC.samples.comp, comp2 == "CHO")
+CHO.MLB <- data.frame(CHO.MLB = (colSums(CHO.samples[,1:322] > 0)/(sum(FTIC.data.noSDL$comp2=="CHO")))*100)
+
+# CHON
+CHON1.samples <- subset(high.HC.samples.comp, comp2 == "CHON1")
+CHON1.MLB <- data.frame(CHON1.MLB = (colSums(CHON1.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHON1"))*100)
+CHON2.samples <- subset(high.HC.samples.comp, comp2 == "CHON2")
+CHON2.MLB <- data.frame(CHON2.MLB = (colSums(CHON2.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHON2"))*100)
+CHON4.samples <- subset(high.HC.samples.comp, comp2 == "CHON4")
+CHON4.MLB <- data.frame(CHON4.MLB = (colSums(CHON4.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHON4"))*100)
+
+CHON.samples <- subset(high.HC.samples.comp, comp2 == "CHON1" | comp2 == "CHON2" | comp2 == "CHON4")
+CHON.MLB <- data.frame(CHON.MLB = (colSums(CHON.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHON1" | FTIC.data.noSDL$comp2=="CHON2" | FTIC.data.noSDL$comp2=="CHON4"))*100)
+
+# CHOP
+CHOP1.samples <- subset(high.HC.samples.comp, comp2 == "CHOP1")
+CHOP1.MLB <- data.frame(CHOP1.MLB = (colSums(CHOP1.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHOP1"))*100)
+
+# CHOS
+CHOS1.samples <- subset(high.HC.samples.comp, comp2 == "CHOS1")
+CHOS1.MLB <- data.frame(CHOS1.MLB = (colSums(CHOS1.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHOS1"))*100)
+CHOS2.samples <- subset(high.HC.samples.comp, comp2 == "CHOS2")
+CHOS2.MLB <- data.frame(CHOS2.MLB = (colSums(CHOS2.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHOS2"))*100)
+
+CHOS.samples <- subset(high.HC.samples.comp, comp2 == "CHOS1" | comp2 == "CHOS2")
+CHOS.MLB <- data.frame(CHOS.MLB = (colSums(CHOS.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHOS1" | FTIC.data.noSDL$comp2=="CHOS2"))*100)
+
+# CHON1P1
+CHON1P1.samples <- subset(high.HC.samples.comp, comp2 == "CHON1P1")
+CHON1P1.MLB <- data.frame(CHON1P1.MLB = (colSums(CHON1P1.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHON1P1"))*100)
+
+# CHON1S1 
+CHON1S1.samples <- subset(high.HC.samples.comp, comp2 == "CHON1S1")
+CHON1S1.MLB <- data.frame(CHON1S1.MLB = (colSums(CHON1S1.samples[,1:322] > 0)/sum(FTIC.data.noSDL$comp2=="CHON1S1"))*100) 
+
+hetero.MLB <- cbind(CHO.MLB,
+                         CHON1.MLB,
+                         CHON2.MLB,
+                         CHON4.MLB,
+                         CHON.MLB,
+                         CHOP1.MLB,
+                         CHOS1.MLB,
+                         CHOS2.MLB,
+                         CHOS.MLB)
+MLB <- cbind(overall.MLB, hetero.MLB, RDA.scores.noSDL[c(32,34)])
+colnames(MLB)[37] <- "overall.MLB"
+
+MLB %>% 
+  ggplot()+
+  geom_point(aes(x = Shannon, y = perc.MLB, color = Ant.Weekly.Total.Discharge.m3s))+
+  facet_wrap(~Season)+
+  stat_cor(aes(x = Shannon, y = perc.MLB))
+
+ggplot(MLB, 
+       aes(x = Datetime, y = `PO4 (ugP/L)`, color = avg.OC)) + 
+  geom_point(size = 2.5, alpha = 0.7) + 
+  #labs(x = "Date") + 
+  scale_x_datetime(limits=c(as.POSIXct("2013-10-01"),
+                            as.POSIXct("2015-02-28")),
+                   breaks = (seq(as.POSIXct("2013-11-01"),
+                                 as.POSIXct("2015-02-01"), "3 months")),
+                   labels = scales::label_date("%b %Y")) +
+  #scale_y_continuous(limits=c(-0.2, 0.2)) +
+  scale_color_cmocean(name = "deep", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25)) + # limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")#+
+  #facet_grid(~Season)
+```
+
+```{r}
+RDA.scores.noSDL <- cbind(RDA.scores.noSDL, subset(GC_DD_MF_all[8:19], rownames(GC_DD_MF_all) %in% rownames(RDA.scores.noSDL)))
+```
+
+
+### Heteroatom MLB relationships
+
+```{r}
+# MLB and RDA1-3
+ggpairs(MLB,
+        columns = c(37,38,42,43,46,34:36),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("overall MLB", "CHO MLB", "CHON MLB", "CHOP MLB", "CHOS MLB", "RDA1", "RDA2", "RDA3")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+# MLB and PC1-2
+ggpairs(MLB,
+        columns = c(37,38,42,43,46,32:33),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("overall MLB", "CHO MLB", "CHON MLB", "CHOP MLB", "CHOS MLB", "PC1", "PC2")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+# specific MLB heteroatom groups and RDA3 and PC1
+# MLB and PC1-2
+ggpairs(MLB,
+        columns = c(39,40,41,43,36,32),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("CHON1 MLB", "CHON2 MLB", "CHON4 MLB", "CHOP MLB", "RDA3", "PC1")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+```
+
+# Imap - mangrove porewater index from Michael Seidel (unpublished
+
+```{r}
+m.pos<-c("C18H24O7S","C20H30O8S","C20H28O9S","C18H26O7S","C16H24O7S","C18H24O8S","C18H26O8S","C19H26O8S","C13H12O7S","C19H26O9S", "C17H24O8S","C12H10O6S","C18H28O7S","C16H26O7S","C19H28O7S","C16H20O9S","C14H14O8S","C19H28O8S","C16H22O8S","C15H14O8S","C17H22O8S","C14H10O6S","C16H14O6S","C11H10O5S","C13H10O6S","C15H12O7S","C13H12O6S","C22H32O8S","C15H16O9S","C19H24O9S","C15H18O8S","C18H22O9S","C13H12O5S","C11H12O6S","C21H32O8S","C14H12O5S","C14H14O7S","C13H16O8S","C13H14O7S","C13H18O7S")
+ftdom.m.neg <- (all.dom)[rownames(all.dom)%in%t.pos,] # take t.pos (d13C has a negative sign and meant are the Island of stability peaks) 
+m.neg.sums <- colSums(ftdom.m.neg)
+ftdom.m.pos <- (all.dom)[rownames(all.dom)%in%m.pos,]
+m.pos.sums <- colSums(ftdom.m.pos)
+Imap <- data.frame(Imap = m.pos.sums/(m.pos.sums + m.neg.sums))
+```
+
+## testing if SUP formulas match the Imap formulas (what he published the index as)
+
+```{r}
+mbind<-function(...){
+ Reduce( function(x,y){cbind(x,y[match(row.names(x),row.names(y)),])}, list(...) )
+}
+```
+
+```{r}
+sup.formulas <- data.frame(sup.form = c("C11H10O5S","C11H12O6S","C13H12O5S","C12H10O6S","C14H12O5S","C13H10O6S","C13H12O6S","C14H10O6S","C13H12O7S","C13H14O7S","C13H18O7S","C14H14O7S","C13H16O8S","C16H14O6S","C15H12O7S","C14H14O8S","C15H14O8S","C15H18O8S","C16H24O7S","C16H26O7S","C15H16O9S","C16H22O8S","C18H24O7S","C17H22O8S","C18H26O7S","C16H20O9S","C17H24O8S","C18H28O7S","C18H24O8S","C19H28O7S","C18H26O8S","C18H22O9S","C19H26O8S","C19H28O8S","C19H24O9S","C19H26O9S","C20H30O8S","C20H28O9S","C21H32O8S","C22H32O8S"), 
+                           row.names = c("C11H10O5S","C11H12O6S","C13H12O5S","C12H10O6S","C14H12O5S","C13H10O6S","C13H12O6S","C14H10O6S","C13H12O7S","C13H14O7S","C13H18O7S","C14H14O7S","C13H16O8S","C16H14O6S","C15H12O7S","C14H14O8S","C15H14O8S","C15H18O8S","C16H24O7S","C16H26O7S","C15H16O9S","C16H22O8S","C18H24O7S","C17H22O8S","C18H26O7S","C16H20O9S","C17H24O8S","C18H28O7S","C18H24O8S","C19H28O7S","C18H26O8S","C18H22O9S","C19H26O8S","C19H28O8S","C19H24O9S","C19H26O9S","C20H30O8S","C20H28O9S","C21H32O8S","C22H32O8S"))
+
+m.pos.df <- data.frame(m.pos.form = c("C18H24O7S","C20H30O8S","C20H28O9S","C18H26O7S","C16H24O7S","C18H24O8S","C18H26O8S","C19H26O8S","C13H12O7S","C19H26O9S", "C17H24O8S","C12H10O6S","C18H28O7S","C16H26O7S","C19H28O7S","C16H20O9S","C14H14O8S","C19H28O8S","C16H22O8S","C15H14O8S","C17H22O8S","C14H10O6S","C16H14O6S","C11H10O5S","C13H10O6S","C15H12O7S","C13H12O6S","C22H32O8S","C15H16O9S","C19H24O9S","C15H18O8S","C18H22O9S","C13H12O5S","C11H12O6S","C21H32O8S","C14H12O5S","C14H14O7S","C13H16O8S","C13H14O7S","C13H18O7S"),
+                       row.names = c("C18H24O7S","C20H30O8S","C20H28O9S","C18H26O7S","C16H24O7S","C18H24O8S","C18H26O8S","C19H26O8S","C13H12O7S","C19H26O9S", "C17H24O8S","C12H10O6S","C18H28O7S","C16H26O7S","C19H28O7S","C16H20O9S","C14H14O8S","C19H28O8S","C16H22O8S","C15H14O8S","C17H22O8S","C14H10O6S","C16H14O6S","C11H10O5S","C13H10O6S","C15H12O7S","C13H12O6S","C22H32O8S","C15H16O9S","C19H24O9S","C15H18O8S","C18H22O9S","C13H12O5S","C11H12O6S","C21H32O8S","C14H12O5S","C14H14O7S","C13H16O8S","C13H14O7S","C13H18O7S"))
+
+
+s.matches <- mbind(sup.formulas, m.pos.df) # 40 matches -- all the same formulas
+```
+
+
+```{r}
+all.index.sums <- as.data.frame(cbind(ideg[c(1,3)], ios.percent, Iterr, Imap))
+```
+
+# Iphoto and Ibio
+
+```{r}
+iphoto.formulas<- c("C16H16O7", "C19H20O7", "C16H20N2O9", "C23H26O8", "C24H30O8")
+ibio.formulas<- c("C13H18O5", "C13H16O6", "C13H19NO6", "C13H17NO7", "C18H28O7")
+resistant.formulas <- c("C14H16O8", "C17H24O8", "C16H22O9", "C19H28O9", "C19H28O10")
+
+ftdom.iphoto <- (all.dom)[rownames(all.dom) %in% iphoto.formulas,]
+iphoto.sums <- colSums(ftdom.iphoto)
+
+ftdom.resistant <- (all.dom)[rownames(all.dom) %in% resistant.formulas,]
+resistant.sums <- colSums(ftdom.resistant)
+
+ftdom.ibio <- (all.dom)[rownames(all.dom) %in% ibio.formulas,]
+ibio.sums <- colSums(ftdom.ibio)
+
+iphoto <- data.frame(Iphoto = iphoto.sums/resistant.sums)
+ibio <- data.frame(Ibio = ibio.sums/resistant.sums)
+
+RDA.scores.noSDL <- cbind(RDA.scores.noSDL, iphoto, ibio)
+PCA.scores.noSDL <- cbind(PCA.scores.noSDL, iphoto, ibio)
+  
+ggpairs(RDA.scores.noSDL,
+        columns = c(38,39,40,76,77),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("RDA1", "RDA2", "RDA3", "Iphoto", "Ibio")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggpairs(PCA.scores.noSDL,
+        columns = c(38,39,43,44),
+        aes(color = Season,
+            alpha = 0.5),
+        columnLabels = c("PC1", "PC2", "Iphoto", "Ibio")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 0.5)) +
+  scale_color_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160")) +
+  scale_fill_manual(values=c("#225256", "#619FAD", "#EAA6B0", "#DB6160"))
+
+ggplot(RDA.scores.noSDL,
+       aes(x = avg.OC, y = PC1, color = perc.MLB)) + 
+  geom_point(shape = 20, alpha = 0.7, size = 4) + 
+  labs(x = "Intensity-weighted average O/C", 
+       y = "PC1 (25.9%)", 
+       color = bquote("%"*MLB[L]), 
+       caption = bquote("%"*MLB[L]*"= molecular lability bounday from D'Andrilli et al 2023")) + 
+  scale_x_continuous(limits=c(0.33, 0.45), breaks=seq(0.33, 0.45, 0.03)) +
+  scale_y_continuous(limits=c(-0.2, 0.2)) +
+  scale_color_cmocean(name = "matter", direction=1, guide = guide_colorbar(barwidth = 1, barheight = 10, ticks = FALSE, nbin = 1000, frame.colour = "black", frame.linewidth = 0.25), limits = c(7,12)) + 
+  theme_linedraw() + 
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  stat_cor(method = "pearson",cor.coef.name = c("R"), color = "black")
+
+```
+
